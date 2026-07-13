@@ -1,27 +1,60 @@
-import React from "react";
-import { TrendingUp, TrendingDown } from "lucide-react";
+import { supabase } from "./supabase";
 
-/* ---------------- constants ---------------- */
-export const CURRENT_MONTH = "2026-07";
+/* ---------------- AUTH ---------------- */
+export const authApi = {
+  signIn: (email, password) => supabase.auth.signInWithPassword({ email, password }),
+  signUp: (email, password) => supabase.auth.signUp({ email, password }),
+  signOut: () => supabase.auth.signOut(),
+  getSession: () => supabase.auth.getSession(),
+  onChange: (cb) => supabase.auth.onAuthStateChange((_e, s) => cb(s)),
+  async isMember() {
+    const { data, error } = await supabase.from("members").select("user_id, role").maybeSingle();
+    if (error) return { member: false, role: null };
+    return { member: !!data, role: data?.role || null };
+  },
+};
 
-export const MONTHS = (() => {
-  const out = [];
-  let y = 2025, m = 7;
-  const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  for (let i = 0; i < 20; i++) {
-    out.push({ key: `${y}-${String(m + 1).padStart(2, "0")}`, label: `${names[m]} ${y}` });
-    m++; if (m > 11) { m = 0; y++; }
-  }
-  return out;
-})();
+/* ---------------- TENANTS ---------------- */
+export const tenantsApi = {
+  list: () => supabase.from("tenants").select("*").order("unit"),
+  upsert: (t) => supabase.from("tenants").upsert(t).select().single(),
+  remove: (id) => supabase.from("tenants").delete().eq("id", id),
+};
 
-export const EXPENSE_CATEGORIES = [
-  "Repairs", "Maintenance", "Utilities", "Water/Sewer", "Insurance",
-  "Property tax", "Mortgage", "Legal", "Supplies", "Management", "Other",
-];
+/* ---------------- RENT TERMS (effective-dated splits) ---------------- */
+export const rentTermsApi = {
+  list: () => supabase.from("rent_terms").select("*").order("effective_from"),
+  add: (row) => supabase.from("rent_terms").insert(row).select().single(),
+  remove: (id) => supabase.from("rent_terms").delete().eq("id", id),
+};
 
-export const STATUS = {
-  paid:    { label: "Paid",    fg: "#0f7a54", bg: "#e3f3ec", dot: "#12a06e" },
-  partial: { label: "Partial", fg: "#9a6511", bg: "#fbf0d9", dot: "#e0a326" },
-  owed:    { label: "Owed",    fg: "#a83232", bg: "#f8e5e2", dot: "#d24b4b" },
-  none:    { label: "Owed",    fg:
+/* ---------------- PARKING ---------------- */
+export const parkingApi = {
+  list: () => supabase.from("parking_spots").select("*").order("spot"),
+  paidForMonth: (month) => supabase.from("parking_payments").select("*").eq("month", month),
+  setPaid: (spot_id, month, paid) =>
+    supabase.from("parking_payments").upsert({ spot_id, month, paid }, { onConflict: "spot_id,month" }),
+};
+
+/* ---------------- PAYMENTS ---------------- */
+export const paymentsApi = {
+  statusForMonth: (month) => supabase.from("payment_status").select("*").eq("month", month),
+  allStatus: () => supabase.from("payment_status").select("tenant_id, month, status, total"),
+  allRaw: () => supabase.from("payments").select("tenant_id, month, govt, portion, assistance"),
+  save: (row) =>
+    supabase.from("payments").upsert(row, { onConflict: "tenant_id,month" }).select().single(),
+};
+
+/* ---------------- EXPENSES ---------------- */
+export const expensesApi = {
+  list: () => supabase.from("expenses").select("*").order("spent_on", { ascending: false }),
+  add: (row) => supabase.from("expenses").insert(row).select().single(),
+  remove: (id) => supabase.from("expenses").delete().eq("id", id),
+};
+
+/* ---------------- NOTES / LOG ---------------- */
+export const notesApi = {
+  list: () => supabase.from("notes").select("*").order("created_at", { ascending: false }),
+  add: (row) => supabase.from("notes").insert(row).select().single(),
+  remove: (id) => supabase.from("notes").delete().eq("id", id),
+};
