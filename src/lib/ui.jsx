@@ -41,6 +41,56 @@ export function reconcile(pay, tenant) {
   return { govt, portion, assistance, total, rent, variance, status };
 }
 
+// Pick the rent term in effect for a given month (terms sorted ascending by effective_from).
+export function applicableTerm(sortedTermsAsc, monthKey) {
+  const monthStart = monthKey + "-01";
+  let chosen = null;
+  for (const term of sortedTermsAsc) {
+    if (term.effective_from <= monthStart) chosen = term; else break;
+  }
+  return chosen;
+}
+
+// Build the carry-forward ledger: per tenant, a running govt balance and
+// tenant balance accrued month by month. Positive = owed to you; negative = credit.
+export function buildLedger(tenants, terms, rawPayments, currentMonth) {
+  const payMap = {};
+  rawPayments.forEach((p) => { payMap[`${p.tenant_id}:${p.month}`] = p; });
+
+  const termsByTenant = {};
+  terms.forEach((t) => { (termsByTenant[t.tenant_id] = termsByTenant[t.tenant_id] || []).push(t); });
+  Object.values(termsByTenant).forEach((arr) => arr.sort((a, b) => (a.effective_from < b.effective_from ? -1 : 1)));
+
+  // Start accruing at the earliest month you actually have data for — never invent
+  // arrears for months before you began tracking.
+  const payMonths = rawPayments.map((p) => p.month).sort();
+  const ledgerStart = payMonths[0] || currentMonth;
+  const monthsDue = MONTHS.filter((m) => m.key >= ledgerStart && m.key <= currentMonth);
+
+  return tenants.map((t) => {
+    const tterms = termsByTenant[t.id] || [];
+    const firstTermMonth = tterms.length ? tterms[0].effective_from.slice(0, 7) : ledgerStart;
+    let govtBal = 0, tenantBal = 0;
+    const detail = [];
+    monthsDue.forEach((m) => {
+      if (m.key < firstTermMonth) return; // tenant not due this month
+      const term = applicableTerm(tterms, m.key) || { lease_rent: t.lease_rent, govt_expected: t.govt_default, tenant_expected: t.portion_default };
+      const pay = payMap[`${t.id}:${m.key}`];
+      const govtRec = pay ? (+pay.govt + +pay.assistance) : 0;
+      const tenRec = pay ? +pay.portion : 0;
+      const govtShort = (+term.govt_expected) - govtRec;
+      const tenShort = (+term.tenant_expected) - tenRec;
+      govtBal += govtShort; tenantBal += tenShort;
+      detail.push({
+        month: m.key, label: m.label,
+        govtExpected: +term.govt_expected, tenantExpected: +term.tenant_expected,
+        govtRec, tenRec, govtShort, tenShort, govtBal, tenantBal,
+      });
+    });
+    return { t, govtBal, tenantBal, totalBal: govtBal + tenantBal, detail };
+  });
+}
+
 /* ---------------- atoms ---------------- */
 export function Money({ v, bold, size = 14, dim }) {
   return (
