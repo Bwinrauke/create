@@ -21,6 +21,13 @@ export const tenantsApi = {
   remove: (id) => supabase.from("tenants").delete().eq("id", id),
 };
 
+/* ---------------- RENT TERMS (effective-dated splits) ---------------- */
+export const rentTermsApi = {
+  list: () => supabase.from("rent_terms").select("*").order("effective_from"),
+  add: (row) => supabase.from("rent_terms").insert(row).select().single(),
+  remove: (id) => supabase.from("rent_terms").delete().eq("id", id),
+};
+
 /* ---------------- PARKING ---------------- */
 export const parkingApi = {
   list: () => supabase.from("parking_spots").select("*").order("spot"),
@@ -33,6 +40,8 @@ export const parkingApi = {
 export const paymentsApi = {
   statusForMonth: (month) => supabase.from("payment_status").select("*").eq("month", month),
   allStatus: () => supabase.from("payment_status").select("tenant_id, month, status, total"),
+  // raw rows for the running-balance ledger
+  allRaw: () => supabase.from("payments").select("tenant_id, month, govt, portion, assistance"),
   save: (row) =>
     supabase.from("payments").upsert(row, { onConflict: "tenant_id,month" }).select().single(),
 };
