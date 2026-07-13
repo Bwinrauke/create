@@ -3,10 +3,13 @@ import {
   Building2, LayoutDashboard, Receipt, Users, Grid3x3, Car,
   Check, Phone, Plus, X, Search, CalendarClock, Banknote, Pencil,
   ChevronRight, ChevronDown, Landmark, Wallet, LogOut, Trash2,
+  StickyNote, TrendingUp,
 } from "lucide-react";
-import { tenantsApi, parkingApi, paymentsApi, rentTermsApi, authApi } from "../lib/db";
 import {
-  S, MONTHS, STATUS, CURRENT_MONTH, money, reconcile, buildLedger,
+  tenantsApi, parkingApi, paymentsApi, rentTermsApi, expensesApi, notesApi, authApi,
+} from "../lib/db";
+import {
+  S, MONTHS, STATUS, CURRENT_MONTH, EXPENSE_CATEGORIES, money, reconcile, buildLedger,
   Money, Variance, Stamp, UnitChip, Legend, BigStat,
 } from "../lib/ui";
 
@@ -19,14 +22,21 @@ export default function RentBook({ session, role }) {
   const [monthStatus, setMonthStatus] = useState([]);
   const [parkingPaid, setParkingPaid] = useState({});
   const [rawPayments, setRawPayments] = useState([]);
+  const [expenses, setExpenses] = useState([]);
+  const [notes, setNotes] = useState([]);
   const [editTenant, setEditTenant] = useState(null);
   const [loading, setLoading] = useState(true);
+  const email = session?.user?.email || "";
 
   const loadStatic = useCallback(async () => {
-    const [t, p, rt] = await Promise.all([tenantsApi.list(), parkingApi.list(), rentTermsApi.list()]);
+    const [t, p, rt, ex, no] = await Promise.all([
+      tenantsApi.list(), parkingApi.list(), rentTermsApi.list(), expensesApi.list(), notesApi.list(),
+    ]);
     setTenants(t.data || []);
     setParking(p.data || []);
     setRentTerms(rt.data || []);
+    setExpenses(ex.data || []);
+    setNotes(no.data || []);
   }, []);
 
   const loadMonth = useCallback(async (m) => {
@@ -60,6 +70,7 @@ export default function RentBook({ session, role }) {
     monthStatus.forEach((r) => { m[r.tenant_id] = r; });
     return m;
   }, [monthStatus]);
+  const monthExpenses = useMemo(() => expenses.filter((e) => (e.spent_on || "").slice(0, 7) === month), [expenses, month]);
 
   const setPay = useCallback(async (tenantId, field, value) => {
     const cur = statusMap[tenantId] || {};
@@ -120,6 +131,10 @@ export default function RentBook({ session, role }) {
   const deleteTenant = async (id) => { await tenantsApi.remove(id); await loadStatic(); setEditTenant(null); };
   const addTerm = async (row) => { await rentTermsApi.add(row); await loadStatic(); };
   const removeTerm = async (id) => { await rentTermsApi.remove(id); await loadStatic(); };
+  const addExpense = async (row) => { await expensesApi.add(row); await loadStatic(); };
+  const removeExpense = async (id) => { await expensesApi.remove(id); await loadStatic(); };
+  const addNote = async (row) => { await notesApi.add({ ...row, author_email: email }); await loadStatic(); };
+  const removeNote = async (id) => { await notesApi.remove(id); await loadStatic(); };
   const toggleParking = async (spotId) => {
     const next = !parkingPaid[spotId];
     setParkingPaid((p) => ({ ...p, [spotId]: next }));
@@ -130,11 +145,15 @@ export default function RentBook({ session, role }) {
     { id: "overview", label: "Overview", icon: LayoutDashboard },
     { id: "collections", label: "Collections", icon: Receipt },
     { id: "ledger", label: "Arrears ledger", icon: Grid3x3 },
+    { id: "expenses", label: "Expenses", icon: Wallet },
     { id: "tenants", label: "Tenants", icon: Users },
     { id: "parking", label: "Parking", icon: Car },
+    { id: "log", label: "Log", icon: StickyNote },
   ];
   const monthLabel = MONTHS.find((m) => m.key === month)?.label || month;
   const modalTerms = editTenant && editTenant !== "new" ? rentTerms.filter((rt) => rt.tenant_id === editTenant.id) : [];
+  const modalNotes = editTenant && editTenant !== "new" ? notes.filter((n) => n.tenant_id === editTenant.id) : [];
+  const buildingNotes = useMemo(() => notes.filter((n) => !n.tenant_id), [notes]);
 
   return (
     <div style={S.page}>
@@ -163,7 +182,7 @@ export default function RentBook({ session, role }) {
         </nav>
         <div style={{ padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,.08)" }}>
           <div style={{ fontSize: 11.5, color: "#8b93a1", marginBottom: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {session?.user?.email} · {role}
+            {email} · {role}
           </div>
           <button onClick={() => authApi.signOut()} style={{ ...S.navBtn, color: "#aeb6c2", padding: "8px 10px" }}>
             <LogOut size={15} /> Sign out
@@ -190,11 +209,13 @@ export default function RentBook({ session, role }) {
             <div style={{ color: "#8a8681", fontFamily: "'Space Grotesk',sans-serif", padding: 40 }}>Loading the rent book…</div>
           ) : (
             <>
-              {view === "overview" && <Overview roll={roll} monthLabel={monthLabel} leaseAlerts={leaseAlerts} go={setView} />}
+              {view === "overview" && <Overview roll={roll} monthLabel={monthLabel} leaseAlerts={leaseAlerts} go={setView} parking={parking} parkingPaid={parkingPaid} monthExpenses={monthExpenses} />}
               {view === "collections" && <Collections roll={roll} monthLabel={monthLabel} setPay={setPay} />}
               {view === "ledger" && <Ledger tenants={activeTenants} terms={rentTerms} rawPayments={rawPayments} />}
+              {view === "expenses" && <Expenses expenses={expenses} monthExpenses={monthExpenses} monthLabel={monthLabel} month={month} tenants={activeTenants} onAdd={addExpense} onRemove={removeExpense} />}
               {view === "tenants" && <Tenants tenants={tenants} onEdit={setEditTenant} onAdd={() => setEditTenant("new")} />}
               {view === "parking" && <Parking parking={parking} parkingPaid={parkingPaid} monthLabel={monthLabel} toggle={toggleParking} />}
+              {view === "log" && <LogTab notes={buildingNotes} onAdd={(body) => addNote({ tenant_id: null, body })} onRemove={removeNote} />}
             </>
           )}
         </div>
@@ -204,11 +225,14 @@ export default function RentBook({ session, role }) {
         <TenantModal
           tenant={editTenant === "new" ? null : editTenant}
           terms={modalTerms}
+          tenantNotes={modalNotes}
           onClose={() => setEditTenant(null)}
           onSave={saveTenant}
           onDelete={deleteTenant}
           onAddTerm={addTerm}
           onRemoveTerm={removeTerm}
+          onAddNote={(body, tid) => addNote({ tenant_id: tid, body })}
+          onRemoveNote={removeNote}
         />
       )}
     </div>
@@ -216,17 +240,70 @@ export default function RentBook({ session, role }) {
 }
 
 /* ================= OVERVIEW ================= */
-function Overview({ roll, monthLabel, leaseAlerts, go }) {
+function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, monthExpenses }) {
   const rate = roll.expected ? Math.round((roll.collected / roll.expected) * 100) : 0;
   const owedRows = roll.rows.filter((x) => x.r.status !== "paid");
   const n = Math.max(roll.rows.length, 1);
+
+  const income = {};
+  roll.rows.forEach(({ t, r }) => {
+    if (r.govt > 0) income[t.program || "Government"] = (income[t.program || "Government"] || 0) + r.govt;
+    if (r.assistance > 0) income["Assistance / supplements"] = (income["Assistance / supplements"] || 0) + r.assistance;
+    if (r.portion > 0) income["Tenant paid"] = (income["Tenant paid"] || 0) + r.portion;
+  });
+  const parkingCollected = parking.reduce((s, p) => s + (parkingPaid[p.id] ? +p.amount : 0), 0);
+  if (parkingCollected > 0) income["Parking"] = parkingCollected;
+  const incomeRows = Object.entries(income).sort((a, b) => b[1] - a[1]);
+  const totalIncome = incomeRows.reduce((s, [, v]) => s + v, 0);
+  const totalExpenses = monthExpenses.reduce((s, e) => s + +e.amount, 0);
+  const net = totalIncome - totalExpenses;
+  const SRC_COLORS = ["#147d5a", "#b8892b", "#3a6ea5", "#9a6511", "#7a5c9e", "#5a6472"];
+
   return (
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 14, marginBottom: 22 }}>
         <BigStat label={`Expected · ${monthLabel}`} value={money(roll.expected)} sub={`${roll.rows.length} active units`} accent="#1c2836" />
         <BigStat label="Collected" value={money(roll.collected)} sub={`${rate}% of rent roll`} accent="#0f7a54" />
         <BigStat label="Outstanding" value={money(roll.outstanding)} sub={`${roll.owedCt + roll.partialCt} units short`} accent={roll.outstanding > 0.5 ? "#a83232" : "#0f7a54"} />
-        <BigStat label="Govt vs tenant" value={money(roll.govtTotal)} sub={`+ ${money(roll.tenantTotal)} tenant share`} accent="#8a6a1e" />
+        <BigStat label="Net operating" value={money(net)} sub={`${money(totalIncome)} in − ${money(totalExpenses)} out`} accent={net >= 0 ? "#0f7a54" : "#a83232"} />
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16, alignItems: "start" }}>
+        <div style={S.card}>
+          <div style={{ ...S.cardTitle, marginBottom: 14 }}>Income by source · {monthLabel}</div>
+          {incomeRows.length === 0 ? (
+            <div style={{ color: "#8a8681", fontSize: 13, padding: "8px 0" }}>No income logged yet this month.</div>
+          ) : incomeRows.map(([label, val], i) => (
+            <div key={label} style={{ marginBottom: 11 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 4 }}>
+                <span style={{ color: "#4a4842", fontWeight: 600 }}>{label}</span>
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: "#1c2836", fontWeight: 600 }}>{money(val)}</span>
+              </div>
+              <div style={{ height: 7, borderRadius: 4, background: "#eee9df", overflow: "hidden" }}>
+                <div style={{ width: `${(val / totalIncome) * 100}%`, height: "100%", background: SRC_COLORS[i % SRC_COLORS.length] }} />
+              </div>
+            </div>
+          ))}
+          {incomeRows.length > 0 && (
+            <div style={{ display: "flex", justifyContent: "space-between", marginTop: 14, paddingTop: 12, borderTop: "1px solid #f0ece3", fontSize: 13, fontWeight: 700 }}>
+              <span>Total income</span><Money v={totalIncome} bold />
+            </div>
+          )}
+        </div>
+
+        <div style={S.card}>
+          <div style={{ ...S.cardTitle, marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
+            <span>Month P&amp;L</span>
+            <button onClick={() => go("expenses")} style={S.linkBtn}>Expenses <ChevronRight size={13} /></button>
+          </div>
+          <PLRow label="Rent + parking collected" v={totalIncome} />
+          <PLRow label="Expenses" v={-totalExpenses} />
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 10, paddingTop: 12, borderTop: "2px solid #ece7dc" }}>
+            <span style={{ fontWeight: 700, fontSize: 14 }}>Net operating</span>
+            <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 700, fontSize: 18, color: net >= 0 ? "#0f7a54" : "#a83232" }}>{money(net)}</span>
+          </div>
+          <div style={{ fontSize: 11.5, color: "#a29d92", marginTop: 8 }}>Based on money actually collected and expenses logged for {monthLabel}.</div>
+        </div>
       </div>
 
       <div style={S.card}>
@@ -295,6 +372,15 @@ function Overview({ roll, monthLabel, leaseAlerts, go }) {
           ))}
         </div>
       </div>
+    </div>
+  );
+}
+
+function PLRow({ label, v }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 0" }}>
+      <span style={{ fontSize: 13, color: "#4a4842" }}>{label}</span>
+      <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13.5, fontWeight: 600, color: v < 0 ? "#a83232" : "#1c2836" }}>{money(v)}</span>
     </div>
   );
 }
@@ -383,7 +469,7 @@ function TextCell({ value, onCommit }) {
   );
 }
 
-/* ================= ARREARS LEDGER (running balances) ================= */
+/* ================= ARREARS LEDGER ================= */
 function Bal({ v, size = 13 }) {
   if (Math.abs(v) < 0.5) return <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: size, color: "#9a958c" }}>—</span>;
   const owed = v > 0;
@@ -460,7 +546,7 @@ function Ledger({ tenants, terms, rawPayments }) {
         </div>
       </div>
       <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10 }}>
-        Balances carry forward from the first month you logged. Govt and tenant shortfalls are tracked separately, so you know whether to chase the agency or the tenant. This is the running record housing court asks for.
+        Balances carry forward from the first month you logged. Govt and tenant shortfalls are tracked separately, so you know whether to chase the agency or the tenant.
       </div>
     </div>
   );
@@ -494,6 +580,150 @@ function LedgerDetail({ detail }) {
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+/* ================= EXPENSES ================= */
+function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, onRemove }) {
+  const [scope, setScope] = useState("month");
+  const shown = scope === "month" ? monthExpenses : expenses;
+  const total = shown.reduce((s, e) => s + +e.amount, 0);
+
+  const byCategory = {};
+  const byVendor = {};
+  shown.forEach((e) => {
+    byCategory[e.category || "Other"] = (byCategory[e.category || "Other"] || 0) + +e.amount;
+    if (e.vendor) byVendor[e.vendor] = (byVendor[e.vendor] || 0) + +e.amount;
+  });
+  const catRows = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
+  const venRows = Object.entries(byVendor).sort((a, b) => b[1] - a[1]).slice(0, 6);
+
+  return (
+    <div>
+      <ExpenseForm month={month} tenants={tenants} onAdd={onAdd} />
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, margin: "18px 0" }}>
+        <BigStat label={scope === "month" ? `Spent · ${monthLabel}` : "Spent · all time"} value={money(total)} sub={`${shown.length} entries`} accent="#a83232" />
+        {catRows[0] && <BigStat label="Top category" value={money(catRows[0][1])} sub={catRows[0][0]} accent="#8a6a1e" />}
+        {venRows[0] && <BigStat label="Top vendor" value={money(venRows[0][1])} sub={venRows[0][0]} accent="#5a6472" />}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {[["month", `This month`], ["all", "All time"]].map(([k, lbl]) => (
+          <button key={k} onClick={() => setScope(k)} style={{
+            ...S.pill, cursor: "pointer",
+            background: scope === k ? "#161f2b" : "#f3f0e9", color: scope === k ? "#f4d488" : "#8a8681",
+            border: scope === k ? "none" : "1px solid #ddd7cb",
+          }}>{lbl}</button>
+        ))}
+      </div>
+
+      {(catRows.length > 0 || venRows.length > 0) && (
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+          <BreakdownCard title="By category" rows={catRows} total={total} />
+          <BreakdownCard title="By vendor" rows={venRows} total={total} />
+        </div>
+      )}
+
+      <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "13px 18px", borderBottom: "1px solid #eee9df" }}><div style={S.cardTitle}>Entries</div></div>
+        {shown.length === 0 ? (
+          <div style={{ padding: 22, textAlign: "center", color: "#8a8681", fontSize: 13 }}>No expenses logged {scope === "month" ? `for ${monthLabel}` : "yet"}. Add one above.</div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+              <thead>
+                <tr>
+                  {["Date", "Category", "Vendor", "Unit", "Note", "Amount", ""].map((h, i) => (
+                    <th key={h} style={{ ...S.th, textAlign: i === 5 ? "right" : "left" }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {shown.map((e) => (
+                  <tr key={e.id} style={{ borderBottom: "1px solid #f2eee5" }}>
+                    <td style={{ ...S.td, whiteSpace: "nowrap", fontFamily: "'IBM Plex Mono',monospace", fontSize: 12.5 }}>{e.spent_on}</td>
+                    <td style={S.td}><span style={{ fontSize: 12, background: "#f3f0e9", padding: "2px 8px", borderRadius: 5, color: "#5a5850" }}>{e.category}</span></td>
+                    <td style={{ ...S.td, fontWeight: 600, fontSize: 13 }}>{e.vendor || "—"}</td>
+                    <td style={S.td}>{e.unit ? <UnitChip unit={e.unit} /> : <span style={{ fontSize: 11.5, color: "#8a8681" }}>Building</span>}</td>
+                    <td style={{ ...S.td, color: "#6b6b66", fontSize: 12.5, maxWidth: 220 }}>{e.note || ""}</td>
+                    <td style={{ ...S.td, textAlign: "right" }}><Money v={e.amount} bold /></td>
+                    <td style={{ ...S.td, textAlign: "right" }}>
+                      <button onClick={() => onRemove(e.id)} style={{ ...S.iconBtn, color: "#b3ada1" }}><Trash2 size={14} /></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function BreakdownCard({ title, rows, total }) {
+  return (
+    <div style={S.card}>
+      <div style={{ ...S.cardTitle, marginBottom: 12 }}>{title}</div>
+      {rows.length === 0 ? <div style={{ fontSize: 12.5, color: "#8a8681" }}>Nothing to show.</div> : rows.map(([label, val]) => (
+        <div key={label} style={{ marginBottom: 9 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12.5, marginBottom: 3 }}>
+            <span style={{ color: "#4a4842", fontWeight: 600 }}>{label}</span>
+            <span style={{ fontFamily: "'IBM Plex Mono',monospace", color: "#1c2836", fontWeight: 600 }}>{money(val)}</span>
+          </div>
+          <div style={{ height: 6, borderRadius: 4, background: "#eee9df", overflow: "hidden" }}>
+            <div style={{ width: `${total ? (val / total) * 100 : 0}%`, height: "100%", background: "#b8892b" }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ExpenseForm({ month, tenants, onAdd }) {
+  const today = `${month}-01`;
+  const [f, setF] = useState({ spent_on: today, amount: "", category: "Repairs", vendor: "", unit: "", note: "" });
+  const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
+  const units = [...new Set(tenants.map((t) => t.unit))];
+  const submit = () => {
+    if (!f.amount) return;
+    onAdd({
+      spent_on: f.spent_on || today,
+      amount: parseFloat(f.amount) || 0,
+      category: f.category,
+      vendor: f.vendor || null,
+      unit: f.unit || null,
+      note: f.note || null,
+    });
+    setF({ spent_on: f.spent_on, amount: "", category: f.category, vendor: "", unit: "", note: "" });
+  };
+  return (
+    <div style={S.card}>
+      <div style={{ ...S.cardTitle, marginBottom: 14 }}>Log an expense</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.2fr 1.2fr 1fr", gap: 10, alignItems: "end" }}>
+        <FormField label="Date"><input style={S.field} type="date" value={f.spent_on} onChange={(e) => set("spent_on", e.target.value)} /></FormField>
+        <FormField label="Amount"><input style={S.field} inputMode="decimal" placeholder="0.00" value={f.amount} onChange={(e) => set("amount", e.target.value)} /></FormField>
+        <FormField label="Category">
+          <select style={S.field} value={f.category} onChange={(e) => set("category", e.target.value)}>
+            {EXPENSE_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </FormField>
+        <FormField label="Vendor"><input style={S.field} placeholder="e.g. Con Ed" value={f.vendor} onChange={(e) => set("vendor", e.target.value)} /></FormField>
+        <FormField label="Unit">
+          <select style={S.field} value={f.unit} onChange={(e) => set("unit", e.target.value)}>
+            <option value="">Building-wide</option>
+            {units.map((u) => <option key={u} value={u}>{u}</option>)}
+          </select>
+        </FormField>
+      </div>
+      <div style={{ display: "flex", gap: 10, marginTop: 10, alignItems: "end" }}>
+        <div style={{ flex: 1 }}>
+          <FormField label="Note"><input style={S.field} placeholder="What was it for?" value={f.note} onChange={(e) => set("note", e.target.value)} /></FormField>
+        </div>
+        <button onClick={submit} style={S.primaryBtn}><Plus size={16} /> Add expense</button>
+      </div>
     </div>
   );
 }
@@ -554,7 +784,7 @@ function MiniStat({ icon: Icon, label, v, strong }) {
   );
 }
 
-function TenantModal({ tenant, terms, onClose, onSave, onDelete, onAddTerm, onRemoveTerm }) {
+function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, onAddTerm, onRemoveTerm, onAddNote, onRemoveNote }) {
   const [f, setF] = useState(tenant || {
     name: "", unit: "", beds: "2BR", lease_rent: 0, deposit: 0, lease_start: "", lease_end: "",
     program: "Section 8", govt_default: 0, portion_default: 0, phone: "", active: true,
@@ -589,6 +819,13 @@ function TenantModal({ tenant, terms, onClose, onSave, onDelete, onAddTerm, onRe
 
         <RentSchedule tenant={tenant} terms={terms} onAddTerm={onAddTerm} onRemoveTerm={onRemoveTerm} />
 
+        {tenant && (
+          <div style={{ marginTop: 18, borderTop: "1px solid #eee9df", paddingTop: 16 }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13.5, color: "#1c2836", marginBottom: 10 }}>Notes</div>
+            <NotesPanel notes={tenantNotes} onAdd={(body) => onAddNote(body, tenant.id)} onRemove={onRemoveNote} placeholder="e.g. Spoke to tenant 7/15, promised portion by month-end" compact />
+          </div>
+        )}
+
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: 22 }}>
           {tenant ? <button onClick={() => onDelete(f.id)} style={{ ...S.ghostBtn, color: "#a83232" }}>Remove</button> : <span />}
           <div style={{ display: "flex", gap: 10 }}>
@@ -602,26 +839,23 @@ function TenantModal({ tenant, terms, onClose, onSave, onDelete, onAddTerm, onRe
 }
 
 function RentSchedule({ tenant, terms, onAddTerm, onRemoveTerm }) {
-  const [nt, setNt] = useState({ effective_from: "", lease_rent: "", govt_expected: "", tenant_expected: "", note: "" });
+  const [nt, setNt] = useState({ effective_from: "", lease_rent: "", govt_expected: "", tenant_expected: "" });
   const set = (k, v) => setNt((p) => ({ ...p, [k]: v }));
   const add = () => {
     if (!tenant || !nt.effective_from) return;
     onAddTerm({
-      tenant_id: tenant.id,
-      effective_from: nt.effective_from,
+      tenant_id: tenant.id, effective_from: nt.effective_from,
       lease_rent: parseFloat(nt.lease_rent) || 0,
       govt_expected: parseFloat(nt.govt_expected) || 0,
       tenant_expected: parseFloat(nt.tenant_expected) || 0,
-      note: nt.note || "Recertification",
+      note: "Recertification",
     });
-    setNt({ effective_from: "", lease_rent: "", govt_expected: "", tenant_expected: "", note: "" });
+    setNt({ effective_from: "", lease_rent: "", govt_expected: "", tenant_expected: "" });
   };
-
   return (
     <div style={{ marginTop: 18, borderTop: "1px solid #eee9df", paddingTop: 16 }}>
       <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13.5, color: "#1c2836", marginBottom: 4 }}>Rent schedule (recertifications)</div>
       <div style={{ fontSize: 11.5, color: "#8a8681", marginBottom: 12 }}>Each dated term sets the govt/tenant split from that date forward. Past months keep the split that was in effect then.</div>
-
       {!tenant ? (
         <div style={{ fontSize: 12.5, color: "#8a8681", background: "#faf8f3", padding: 12, borderRadius: 8 }}>Save the tenant first, then reopen to add recert terms. A starting term is created automatically.</div>
       ) : (
@@ -656,6 +890,55 @@ function Field({ label, span, children }) {
       <div style={{ fontSize: 11.5, color: "#8a8681", marginBottom: 5, fontWeight: 600 }}>{label}</div>
       {children}
     </label>
+  );
+}
+function FormField({ label, children }) {
+  return (
+    <label>
+      <div style={{ fontSize: 11.5, color: "#8a8681", marginBottom: 5, fontWeight: 600 }}>{label}</div>
+      {children}
+    </label>
+  );
+}
+
+/* ================= NOTES / LOG ================= */
+function NotesPanel({ notes, onAdd, onRemove, placeholder, compact }) {
+  const [body, setBody] = useState("");
+  const post = () => { if (!body.trim()) return; onAdd(body.trim()); setBody(""); };
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+        <textarea value={body} onChange={(e) => setBody(e.target.value)} placeholder={placeholder || "Add a note…"} rows={compact ? 2 : 3}
+          style={{ ...S.field, flex: 1, resize: "vertical", fontFamily: "'Inter',sans-serif", lineHeight: 1.4 }} />
+        <button onClick={post} style={{ ...S.primaryBtn, alignSelf: "flex-start" }}><Plus size={15} /> Post</button>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {notes.length === 0 && <div style={{ fontSize: 12.5, color: "#8a8681" }}>No notes yet.</div>}
+        {notes.map((n) => (
+          <div key={n.id} style={{ background: "#faf8f3", borderRadius: 9, padding: "10px 13px", display: "flex", gap: 10 }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ fontSize: 13, color: "#2c2c28", whiteSpace: "pre-wrap", lineHeight: 1.45 }}>{n.body}</div>
+              <div style={{ fontSize: 10.5, color: "#a29d92", marginTop: 5 }}>
+                {n.author_email ? `${n.author_email} · ` : ""}{n.created_at ? new Date(n.created_at).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" }) : ""}
+              </div>
+            </div>
+            <button onClick={() => onRemove(n.id)} style={{ ...S.iconBtn, color: "#b3ada1", alignSelf: "flex-start" }}><Trash2 size={14} /></button>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LogTab({ notes, onAdd, onRemove }) {
+  return (
+    <div style={{ maxWidth: 720 }}>
+      <div style={S.card}>
+        <div style={{ ...S.cardTitle, marginBottom: 4 }}>Building activity log</div>
+        <div style={{ fontSize: 12, color: "#8a8681", marginBottom: 14 }}>Shared notes for the whole building — repairs, calls, agency contacts, anything worth a paper trail. Everyone on the account sees these.</div>
+        <NotesPanel notes={notes} onAdd={onAdd} onRemove={onRemove} placeholder="e.g. Boiler serviced by ABC Mechanical, $450 — logged under Expenses too" />
+      </div>
+    </div>
   );
 }
 
