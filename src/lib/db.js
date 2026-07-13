@@ -40,8 +40,21 @@ export const parkingApi = {
 export const paymentsApi = {
   statusForMonth: (month) => supabase.from("payment_status").select("*").eq("month", month),
   allStatus: () => supabase.from("payment_status").select("tenant_id, month, status, total"),
-  // raw rows for the running-balance ledger
   allRaw: () => supabase.from("payments").select("tenant_id, month, govt, portion, assistance"),
   save: (row) =>
     supabase.from("payments").upsert(row, { onConflict: "tenant_id,month" }).select().single(),
+};
+
+/* ---------------- EXPENSES ---------------- */
+export const expensesApi = {
+  list: () => supabase.from("expenses").select("*").order("spent_on", { ascending: false }),
+  add: (row) => supabase.from("expenses").insert(row).select().single(),
+  remove: (id) => supabase.from("expenses").delete().eq("id", id),
+};
+
+/* ---------------- NOTES / LOG ---------------- */
+export const notesApi = {
+  list: () => supabase.from("notes").select("*").order("created_at", { ascending: false }),
+  add: (row) => supabase.from("notes").insert(row).select().single(),
+  remove: (id) => supabase.from("notes").delete().eq("id", id),
 };
