@@ -153,4 +153,29 @@ create policy payments_rw on payments
 create policy parking_pay_rw on parking_payments
   for all using (is_member()) with check (is_member());
 
+-- ============================================================
+--  REALTIME  (live sync)
+--  Add the data tables to Supabase's realtime publication so the
+--  app receives insert/update/delete events over the websocket and
+--  every signed-in device stays in sync without a refresh. RLS still
+--  applies to the stream, so non-members receive nothing.
+--  Idempotent and safe if some tables (rent_terms/expenses/notes)
+--  live in a separate migration.
+-- ============================================================
+do $$
+declare tbl text;
+begin
+  foreach tbl in array array[
+    'tenants','parking_spots','payments','parking_payments','rent_terms','expenses','notes'
+  ] loop
+    if to_regclass('public.' || tbl) is not null
+       and not exists (
+         select 1 from pg_publication_tables
+         where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = tbl
+       ) then
+      execute format('alter publication supabase_realtime add table public.%I', tbl);
+    end if;
+  end loop;
+end $$;
+
 -- Done. Next: run seed.sql to load the 2137 roster.

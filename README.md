@@ -4,6 +4,13 @@ A real, deployable rent-management platform: hosted database, login, and shared
 data for you and a bookkeeper, on any device. This is the complete front-end
 wired to a Supabase backend.
 
+Works on your phone as well as the desktop — the sidebar collapses into a
+tap-open menu on small screens — and it stays **live** across devices: edits
+sync over Supabase Realtime (Postgres change webhooks), so when the bookkeeper
+marks a check received on their phone, your screen updates without a refresh.
+A green **Live** pip by the logo shows the connection is up. (Realtime is
+switched on for you automatically when you run `backend/schema.sql`.)
+
 ## What's inside
 
 ```

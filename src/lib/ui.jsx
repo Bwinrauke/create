@@ -1,6 +1,24 @@
 import React from "react";
 import { TrendingUp, TrendingDown } from "lucide-react";
 
+/* ---------------- responsive ---------------- */
+// True when the viewport is phone-sized. Drives the sidebar→drawer swap and
+// the collapse of fixed multi-column grids to a single column.
+export const MOBILE_BP = 760;
+export function useIsMobile(breakpoint = MOBILE_BP) {
+  const query = `(max-width: ${breakpoint}px)`;
+  const get = () => (typeof window !== "undefined" && window.matchMedia ? window.matchMedia(query).matches : false);
+  const [isMobile, setIsMobile] = React.useState(get);
+  React.useEffect(() => {
+    const mq = window.matchMedia(query);
+    const on = () => setIsMobile(mq.matches);
+    on();
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, [query]);
+  return isMobile;
+}
+
 /* ---------------- constants ---------------- */
 export const CURRENT_MONTH = "2026-07";
 
@@ -153,6 +171,11 @@ export function BigStat({ label, value, sub, accent }) {
 export const S = {
   page: { display: "flex", height: "100vh", width: "100%", background: "#f4f1ea", fontFamily: "'Inter',sans-serif", color: "#1c2836", overflow: "hidden" },
   sidebar: { width: 234, background: "#161f2b", display: "flex", flexDirection: "column", flexShrink: 0 },
+  // mobile chrome: a white top bar with a hamburger + month picker, and a dark slide-in drawer
+  mtopbar: { display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: "#161f2b", flexShrink: 0 },
+  hamburger: { display: "flex", alignItems: "center", justifyContent: "center", width: 38, height: 38, borderRadius: 9, border: "1px solid rgba(255,255,255,.12)", background: "rgba(255,255,255,.04)", color: "#f4f1ea", flexShrink: 0 },
+  drawerOverlay: { position: "fixed", inset: 0, background: "rgba(9,13,19,.55)", zIndex: 60, display: "flex" },
+  drawer: { width: 250, maxWidth: "82%", background: "#161f2b", height: "100%", display: "flex", flexDirection: "column", boxShadow: "4px 0 30px rgba(0,0,0,.4)" },
   brassPlaque: { width: 34, height: 34, borderRadius: 8, background: "linear-gradient(150deg,#e7c56b,#b8892b)", display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
   navBtn: { display: "flex", alignItems: "center", gap: 11, width: "100%", padding: "10px 12px", marginBottom: 3, borderRadius: 8, border: "none", background: "transparent", fontSize: 13.5, fontWeight: 500, textAlign: "left" },
   topbar: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "18px 28px", background: "#fff", borderBottom: "1px solid #e8e3d8", flexShrink: 0 },

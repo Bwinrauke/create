@@ -1,16 +1,16 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Building2, LayoutDashboard, Receipt, Users, Grid3x3, Car,
   Check, Phone, Plus, X, Search, CalendarClock, Banknote, Pencil,
   ChevronRight, ChevronDown, Landmark, Wallet, LogOut, Trash2,
-  StickyNote, TrendingUp,
+  StickyNote, TrendingUp, Menu,
 } from "lucide-react";
 import {
-  tenantsApi, parkingApi, paymentsApi, rentTermsApi, expensesApi, notesApi, authApi,
+  tenantsApi, parkingApi, paymentsApi, rentTermsApi, expensesApi, notesApi, authApi, realtime,
 } from "../lib/db";
 import {
   S, MONTHS, STATUS, CURRENT_MONTH, EXPENSE_CATEGORIES, money, reconcile, buildLedger,
-  Money, Variance, Stamp, UnitChip, Legend, BigStat,
+  Money, Variance, Stamp, UnitChip, Legend, BigStat, useIsMobile,
 } from "../lib/ui";
 
 export default function RentBook({ session, role }) {
@@ -26,6 +26,9 @@ export default function RentBook({ session, role }) {
   const [notes, setNotes] = useState([]);
   const [editTenant, setEditTenant] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [live, setLive] = useState(false);
+  const isMobile = useIsMobile();
   const email = session?.user?.email || "";
 
   const loadStatic = useCallback(async () => {
@@ -63,6 +66,28 @@ export default function RentBook({ session, role }) {
 
   useEffect(() => { loadMonth(month); }, [month, loadMonth]);
   useEffect(() => { if (view === "ledger") loadLedger(); }, [view, loadLedger]);
+
+  // Live sync: subscribe once to Postgres change webhooks and reload only the
+  // slices a given change touches. Refs keep the subscription stable across
+  // month/view changes so we don't tear the websocket down and back up.
+  const monthRef = useRef(month);
+  const viewRef = useRef(view);
+  useEffect(() => { monthRef.current = month; }, [month]);
+  useEffect(() => { viewRef.current = view; }, [view]);
+
+  useEffect(() => {
+    const debounce = {};
+    const run = (key, fn) => { clearTimeout(debounce[key]); debounce[key] = setTimeout(fn, 250); };
+    const unsub = realtime.subscribe(
+      ({ table }) => {
+        if (["tenants", "rent_terms", "parking_spots", "expenses", "notes"].includes(table)) run("static", loadStatic);
+        if (["payments", "parking_payments"].includes(table)) run("month", () => loadMonth(monthRef.current));
+        if (["payments", "rent_terms"].includes(table) && viewRef.current === "ledger") run("ledger", loadLedger);
+      },
+      (status) => setLive(status === "SUBSCRIBED"),
+    );
+    return () => { Object.values(debounce).forEach(clearTimeout); unsub(); };
+  }, [loadStatic, loadMonth, loadLedger]);
 
   const activeTenants = useMemo(() => tenants.filter((t) => t.active !== false), [tenants]);
   const statusMap = useMemo(() => {
@@ -155,56 +180,92 @@ export default function RentBook({ session, role }) {
   const modalNotes = editTenant && editTenant !== "new" ? notes.filter((n) => n.tenant_id === editTenant.id) : [];
   const buildingNotes = useMemo(() => notes.filter((n) => !n.tenant_id), [notes]);
 
+  const go = (id) => { setView(id); setDrawerOpen(false); };
+
+  // Shared dark-panel contents — rendered in the desktop sidebar and the mobile drawer.
+  const railInner = (
+    <>
+      <div style={{ padding: "22px 20px 18px", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={S.brassPlaque}><Building2 size={18} color="#1a222e" /></div>
+          <div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: "#f4f1ea" }}>2137 Rent Book</div>
+            <div style={{ fontSize: 11, color: "#8b93a1", display: "flex", alignItems: "center", gap: 6 }}>FDOR · {activeTenants.length} units <LiveDot live={live} /></div>
+          </div>
+        </div>
+      </div>
+      <nav style={{ padding: "14px 12px", flex: 1, overflowY: "auto" }}>
+        {NAV.map((n) => {
+          const on = view === n.id; const Icon = n.icon;
+          return (
+            <button key={n.id} onClick={() => go(n.id)} style={{
+              ...S.navBtn, background: on ? "rgba(184,137,43,.16)" : "transparent",
+              color: on ? "#f4d488" : "#aeb6c2", borderLeft: on ? "2px solid #b8892b" : "2px solid transparent",
+            }}>
+              <Icon size={17} /> {n.label}
+            </button>
+          );
+        })}
+      </nav>
+      <div style={{ padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,.08)" }}>
+        <div style={{ fontSize: 11.5, color: "#8b93a1", marginBottom: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {email} · {role}
+        </div>
+        <button onClick={() => authApi.signOut()} style={{ ...S.navBtn, color: "#aeb6c2", padding: "8px 10px" }}>
+          <LogOut size={15} /> Sign out
+        </button>
+      </div>
+    </>
+  );
+
   return (
-    <div style={S.page}>
-      <aside style={S.sidebar}>
-        <div style={{ padding: "22px 20px 18px", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={S.brassPlaque}><Building2 size={18} color="#1a222e" /></div>
-            <div>
-              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: "#f4f1ea" }}>2137 Rent Book</div>
-              <div style={{ fontSize: 11, color: "#8b93a1" }}>FDOR · {activeTenants.length} units</div>
+    <div style={{ ...S.page, flexDirection: isMobile ? "column" : "row" }}>
+      {!isMobile && <aside style={S.sidebar}>{railInner}</aside>}
+
+      {isMobile && (
+        <header style={S.mtopbar}>
+          <button onClick={() => setDrawerOpen(true)} style={S.hamburger} aria-label="Open menu"><Menu size={20} /></button>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0, flex: 1 }}>
+            <div style={S.brassPlaque}><Building2 size={16} color="#1a222e" /></div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: "#f4f1ea", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{NAV.find((n) => n.id === view)?.label}</div>
+              <div style={{ fontSize: 10.5, color: "#8b93a1", display: "flex", alignItems: "center", gap: 5 }}>2137 Rent Book <LiveDot live={live} /></div>
             </div>
           </div>
+          <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ ...S.monthSelect, padding: "7px 8px", fontSize: 12.5 }}>
+            {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+          </select>
+        </header>
+      )}
+
+      {isMobile && drawerOpen && (
+        <div style={S.drawerOverlay} onClick={() => setDrawerOpen(false)}>
+          <aside style={S.drawer} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "flex-end", padding: "10px 10px 0" }}>
+              <button onClick={() => setDrawerOpen(false)} style={{ ...S.iconBtn, color: "#aeb6c2" }} aria-label="Close menu"><X size={20} /></button>
+            </div>
+            {railInner}
+          </aside>
         </div>
-        <nav style={{ padding: "14px 12px", flex: 1 }}>
-          {NAV.map((n) => {
-            const on = view === n.id; const Icon = n.icon;
-            return (
-              <button key={n.id} onClick={() => setView(n.id)} style={{
-                ...S.navBtn, background: on ? "rgba(184,137,43,.16)" : "transparent",
-                color: on ? "#f4d488" : "#aeb6c2", borderLeft: on ? "2px solid #b8892b" : "2px solid transparent",
-              }}>
-                <Icon size={17} /> {n.label}
-              </button>
-            );
-          })}
-        </nav>
-        <div style={{ padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,.08)" }}>
-          <div style={{ fontSize: 11.5, color: "#8b93a1", marginBottom: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {email} · {role}
-          </div>
-          <button onClick={() => authApi.signOut()} style={{ ...S.navBtn, color: "#aeb6c2", padding: "8px 10px" }}>
-            <LogOut size={15} /> Sign out
-          </button>
-        </div>
-      </aside>
+      )}
 
       <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-        <header style={S.topbar}>
-          <div>
-            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "#1c2836" }}>{NAV.find((n) => n.id === view)?.label}</div>
-            <div style={{ fontSize: 12.5, color: "#8a8681", marginTop: 1 }}>Building 2137 · subsidized rent roll</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <CalendarClock size={16} color="#8a8681" />
-            <select value={month} onChange={(e) => setMonth(e.target.value)} style={S.monthSelect}>
-              {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-            </select>
-          </div>
-        </header>
+        {!isMobile && (
+          <header style={S.topbar}>
+            <div>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "#1c2836" }}>{NAV.find((n) => n.id === view)?.label}</div>
+              <div style={{ fontSize: 12.5, color: "#8a8681", marginTop: 1 }}>Building 2137 · subsidized rent roll</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <CalendarClock size={16} color="#8a8681" />
+              <select value={month} onChange={(e) => setMonth(e.target.value)} style={S.monthSelect}>
+                {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+              </select>
+            </div>
+          </header>
+        )}
 
-        <div style={{ flex: 1, overflow: "auto", padding: "24px 28px 60px" }}>
+        <div style={{ flex: 1, overflow: "auto", padding: isMobile ? "16px 14px 88px" : "24px 28px 60px" }}>
           {loading ? (
             <div style={{ color: "#8a8681", fontFamily: "'Space Grotesk',sans-serif", padding: 40 }}>Loading the rent book…</div>
           ) : (
@@ -239,8 +300,20 @@ export default function RentBook({ session, role }) {
   );
 }
 
+/* Live-sync status pip — green + subtle glow when the realtime websocket is connected. */
+function LiveDot({ live }) {
+  return (
+    <span title={live ? "Live sync on — changes from other devices appear instantly" : "Connecting live sync…"}
+      style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: live ? "#12a06e" : "#8b93a1", boxShadow: live ? "0 0 0 3px rgba(18,160,110,.2)" : "none" }} />
+      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: live ? "#5fcf9e" : "#8b93a1" }}>{live ? "Live" : "…"}</span>
+    </span>
+  );
+}
+
 /* ================= OVERVIEW ================= */
 function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, monthExpenses }) {
+  const isMobile = useIsMobile();
   const rate = roll.expected ? Math.round((roll.collected / roll.expected) * 100) : 0;
   const owedRows = roll.rows.filter((x) => x.r.status !== "paid");
   const n = Math.max(roll.rows.length, 1);
@@ -268,7 +341,7 @@ function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, mon
         <BigStat label="Net operating" value={money(net)} sub={`${money(totalIncome)} in − ${money(totalExpenses)} out`} accent={net >= 0 ? "#0f7a54" : "#a83232"} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 16, alignItems: "start" }}>
         <div style={S.card}>
           <div style={{ ...S.cardTitle, marginBottom: 14 }}>Income by source · {monthLabel}</div>
           {incomeRows.length === 0 ? (
@@ -322,7 +395,7 @@ function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, mon
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16, marginTop: 16, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr", gap: 16, marginTop: 16, alignItems: "start" }}>
         <div style={S.card}>
           <div style={{ ...S.cardTitle, marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
             <span>Needs attention</span>
@@ -586,6 +659,7 @@ function LedgerDetail({ detail }) {
 
 /* ================= EXPENSES ================= */
 function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, onRemove }) {
+  const isMobile = useIsMobile();
   const [scope, setScope] = useState("month");
   const shown = scope === "month" ? monthExpenses : expenses;
   const total = shown.reduce((s, e) => s + +e.amount, 0);
@@ -620,7 +694,7 @@ function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, 
       </div>
 
       {(catRows.length > 0 || venRows.length > 0) && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 16 }}>
           <BreakdownCard title="By category" rows={catRows} total={total} />
           <BreakdownCard title="By vendor" rows={venRows} total={total} />
         </div>
@@ -683,6 +757,7 @@ function BreakdownCard({ title, rows, total }) {
 }
 
 function ExpenseForm({ month, tenants, onAdd }) {
+  const isMobile = useIsMobile();
   const today = `${month}-01`;
   const [f, setF] = useState({ spent_on: today, amount: "", category: "Repairs", vendor: "", unit: "", note: "" });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
@@ -702,7 +777,7 @@ function ExpenseForm({ month, tenants, onAdd }) {
   return (
     <div style={S.card}>
       <div style={{ ...S.cardTitle, marginBottom: 14 }}>Log an expense</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.2fr 1.2fr 1fr", gap: 10, alignItems: "end" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1.1fr 1fr 1.2fr 1.2fr 1fr", gap: 10, alignItems: "end" }}>
         <FormField label="Date"><input style={S.field} type="date" value={f.spent_on} onChange={(e) => set("spent_on", e.target.value)} /></FormField>
         <FormField label="Amount"><input style={S.field} inputMode="decimal" placeholder="0.00" value={f.amount} onChange={(e) => set("amount", e.target.value)} /></FormField>
         <FormField label="Category">
@@ -785,6 +860,7 @@ function MiniStat({ icon: Icon, label, v, strong }) {
 }
 
 function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, onAddTerm, onRemoveTerm, onAddNote, onRemoveNote }) {
+  const isMobile = useIsMobile();
   const [f, setF] = useState(tenant || {
     name: "", unit: "", beds: "2BR", lease_rent: 0, deposit: 0, lease_start: "", lease_end: "",
     program: "Section 8", govt_default: 0, portion_default: 0, phone: "", active: true,
@@ -803,7 +879,7 @@ function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, on
           <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: "#1c2836" }}>{tenant ? "Edit tenant" : "New tenant"}</div>
           <button onClick={onClose} style={S.iconBtn}><X size={18} /></button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12 }}>
           <Field label="Tenant name" span={2}><input style={S.field} value={f.name} onChange={(e) => set("name", e.target.value)} /></Field>
           <Field label="Unit"><input style={S.field} value={f.unit} onChange={(e) => set("unit", e.target.value)} /></Field>
           <Field label="Bedrooms"><input style={S.field} value={f.beds} onChange={(e) => set("beds", e.target.value)} /></Field>
@@ -839,6 +915,7 @@ function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, on
 }
 
 function RentSchedule({ tenant, terms, onAddTerm, onRemoveTerm }) {
+  const isMobile = useIsMobile();
   const [nt, setNt] = useState({ effective_from: "", lease_rent: "", govt_expected: "", tenant_expected: "" });
   const set = (k, v) => setNt((p) => ({ ...p, [k]: v }));
   const add = () => {
@@ -871,7 +948,7 @@ function RentSchedule({ tenant, terms, onAddTerm, onRemoveTerm }) {
               </div>
             ))}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1.1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
             <Field label="Effective from"><input style={S.field} type="date" value={nt.effective_from} onChange={(e) => set("effective_from", e.target.value)} /></Field>
             <Field label="Rent"><input style={S.field} inputMode="decimal" placeholder="0" value={nt.lease_rent} onChange={(e) => set("lease_rent", e.target.value)} /></Field>
             <Field label="Govt"><input style={S.field} inputMode="decimal" placeholder="0" value={nt.govt_expected} onChange={(e) => set("govt_expected", e.target.value)} /></Field>

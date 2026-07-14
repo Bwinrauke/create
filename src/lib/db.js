@@ -58,3 +58,24 @@ export const notesApi = {
   add: (row) => supabase.from("notes").insert(row).select().single(),
   remove: (id) => supabase.from("notes").delete().eq("id", id),
 };
+
+/* ---------------- REALTIME (live sync via Postgres change webhooks) ----------------
+   Supabase streams every insert/update/delete on the subscribed tables over a
+   websocket. When the bookkeeper edits on their phone, the owner's screen updates
+   without a refresh — and vice versa. onChange gets the raw change payload (with
+   payload.table); onStatus reports the connection state ("SUBSCRIBED", etc.). */
+export const realtime = {
+  // Tables the app reads. Each becomes a live channel.
+  TABLES: ["tenants", "rent_terms", "parking_spots", "parking_payments", "payments", "expenses", "notes"],
+  subscribe(onChange, onStatus) {
+    if (!supabase) return () => {};
+    const channel = supabase.channel("rentbook-live");
+    this.TABLES.forEach((table) => {
+      channel.on("postgres_changes", { event: "*", schema: "public", table }, (payload) => {
+        onChange?.({ ...payload, table });
+      });
+    });
+    channel.subscribe((status) => onStatus?.(status));
+    return () => { supabase.removeChannel(channel); };
+  },
+};
