@@ -547,7 +547,7 @@ function Summary({ tenants, allStatus, allParkPaid, parking, expenses, onJump })
                     <td style={{ ...S.td, textAlign: "right" }}><Money v={r.expected} dim /></td>
                     <td style={{ ...S.td, textAlign: "right" }}><Money v={r.collected} bold /></td>
                     <td style={{ ...S.td, textAlign: "right" }}><Money v={r.parking} /></td>
-                    <td style={{ ...S.td, textAlign: "right" }}><Money v={r.outstanding} /></td>
+                    <td style={{ ...S.td, textAlign: "right" }}><OutMoney v={r.outstanding} /></td>
                     <td style={{ ...S.td, textAlign: "right" }}><Money v={r.expenses} /></td>
                     <td style={{ ...S.td, textAlign: "right" }}><span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: r.net >= 0 ? "#0f7a54" : "#a83232" }}>{money(r.net)}</span></td>
                   </tr>
@@ -559,7 +559,7 @@ function Summary({ tenants, allStatus, allParkPaid, parking, expenses, onJump })
                   <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.expected} bold /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.collected} bold /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.parking} bold /></td>
-                  <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.outstanding} bold /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><OutMoney v={tot.outstanding} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.expenses} bold /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 700, color: tot.net >= 0 ? "#0f7a54" : "#a83232" }}>{money(tot.net)}</span></td>
                 </tr>
@@ -578,8 +578,18 @@ function SumLine({ label, v, dim, warn }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
       <span style={{ color: "#8a8681" }}>{label}</span>
-      <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: warn ? "#a83232" : dim ? "#9a958c" : "#1c2836" }}>{money(v)}</span>
+      <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: warn ? 700 : 600, color: warn ? "#a83232" : dim ? "#9a958c" : "#1c2836" }}>{money(v)}</span>
     </div>
+  );
+}
+
+/* Outstanding balance — bold red when there's a shortfall, muted when clear. */
+function OutMoney({ v, size = 14 }) {
+  const owed = v > 0.5;
+  return (
+    <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: owed ? 700 : 500, fontVariantNumeric: "tabular-nums", color: owed ? "#a83232" : "#9a958c" }}>
+      {money(v)}
+    </span>
   );
 }
 
