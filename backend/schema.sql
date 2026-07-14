@@ -87,6 +87,7 @@ create table if not exists parking_payments (
   spot_id   uuid not null references parking_spots(id) on delete cascade,
   month     text not null,
   paid      boolean not null default false,
+  amount    numeric(10,2) not null default 0,   -- dollars actually received (reconciled)
   updated_at timestamptz not null default now(),
   unique (spot_id, month)
 );

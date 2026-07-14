@@ -59,9 +59,12 @@ export const parkingApi = {
   updateSpot: (id, patch) => supabase.from("parking_spots").update(patch).eq("id", id).select().single(),
   removeSpot: (id) => supabase.from("parking_spots").delete().eq("id", id),
   paidForMonth: (month) => supabase.from("parking_payments").select("*").eq("month", month),
-  allPaid: () => supabase.from("parking_payments").select("spot_id, month, paid"),
+  allPaid: () => supabase.from("parking_payments").select("spot_id, month, paid, amount"),
   setPaid: (spot_id, month, paid) =>
     supabase.from("parking_payments").upsert({ spot_id, month, paid }, { onConflict: "spot_id,month" }),
+  // Record the dollars actually received for a spot in a month (reconciled).
+  setReceived: (spot_id, month, amount) =>
+    supabase.from("parking_payments").upsert({ spot_id, month, amount, paid: (+amount || 0) > 0.001 }, { onConflict: "spot_id,month" }),
 };
 
 /* ---------------- PAYMENTS ---------------- */
