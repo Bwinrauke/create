@@ -156,6 +156,7 @@ export default function RentBook({ session, role }) {
       govt: field === "govt" ? value : (cur.govt || 0),
       portion: field === "portion" ? value : (cur.portion || 0),
       assistance: field === "assistance" ? value : (cur.assistance || 0),
+      extra: field === "extra" ? value : (cur.extra || 0),
       check_num: field === "check_num" ? value : (cur.check_num || ""),
       bank_confirm: field === "bank_confirm" ? value : (cur.bank_confirm || false),
       notes: field === "notes" ? value : (cur.notes || ""),
@@ -166,23 +167,23 @@ export default function RentBook({ session, role }) {
   }, [statusMap, month, loadMonth, flash]);
 
   const roll = useMemo(() => {
-    let expected = 0, collected = 0, govtTotal = 0, tenantTotal = 0, paidCt = 0, partialCt = 0, owedCt = 0;
+    let expected = 0, collected = 0, govtTotal = 0, tenantTotal = 0, extraTotal = 0, paidCt = 0, partialCt = 0, owedCt = 0;
     // A tenant only enters the roll once the viewing month reaches one month
     // before their lease start — or as soon as they have a payment that month.
     const visible = activeTenants.filter((t) => monthReached(t.lease_start, month) || statusMap[t.id]);
     const rows = visible.map((t) => {
       const s = statusMap[t.id];
       const r = s
-        ? { govt: +s.govt, portion: +s.portion, assistance: +s.assistance, total: +s.total, rent: +s.lease_rent, variance: +s.variance, status: s.status }
-        : reconcile(null, t);
+        ? { govt: +s.govt, portion: +s.portion, assistance: +s.assistance, extra: +s.extra || 0, total: +s.total, rent: +s.lease_rent, variance: +s.variance, status: s.status }
+        : { ...reconcile(null, t), extra: 0 };
       const pay = s
-        ? { govt: s.govt, portion: s.portion, assistance: s.assistance, check_num: s.check_num, bank_confirm: s.bank_confirm, notes: s.notes }
+        ? { govt: s.govt, portion: s.portion, assistance: s.assistance, extra: s.extra, check_num: s.check_num, bank_confirm: s.bank_confirm, notes: s.notes }
         : {};
-      expected += r.rent; collected += r.total; govtTotal += r.govt; tenantTotal += r.portion + r.assistance;
+      expected += r.rent; collected += r.total; govtTotal += r.govt; tenantTotal += r.portion + r.assistance; extraTotal += r.extra || 0;
       if (r.status === "paid") paidCt++; else if (r.status === "partial") partialCt++; else owedCt++;
       return { t, r, pay };
     });
-    return { rows, expected, collected, govtTotal, tenantTotal, outstanding: expected - collected, paidCt, partialCt, owedCt };
+    return { rows, expected, collected, govtTotal, tenantTotal, extraTotal, outstanding: expected - collected, paidCt, partialCt, owedCt };
   }, [activeTenants, statusMap, month]);
 
   const leaseAlerts = useMemo(() => {
@@ -693,6 +694,7 @@ function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, mon
     if (r.govt > 0) income[t.program || "Government"] = (income[t.program || "Government"] || 0) + r.govt;
     if (r.assistance > 0) income["Assistance / supplements"] = (income["Assistance / supplements"] || 0) + r.assistance;
     if (r.portion > 0) income["Tenant paid"] = (income["Tenant paid"] || 0) + r.portion;
+    if (r.extra > 0) income["Extra / other"] = (income["Extra / other"] || 0) + r.extra;
   });
   const parkingCollected = parking.reduce((s, p) => s + (+parkingPaid[p.id] || 0), 0);
   if (parkingCollected > 0) income["Parking"] = parkingCollected;
@@ -852,11 +854,11 @@ function Collections({ roll, monthLabel, setPay, parking = [], parkingRec = {}, 
           </div>
         ) : (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1040 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1140 }}>
             <thead>
               <tr>
-                {["Unit", "Tenant", "Lease rent", "Govt (HAP)", "Tenant portion", "Assistance", "Check #", "Collected", "Variance", "Status", "Notes"].map((h, i) => (
-                  <th key={h} style={{ ...S.th, textAlign: i >= 2 && i <= 8 ? "right" : "left" }}>{h}</th>
+                {["Unit", "Tenant", "Lease rent", "Govt (HAP)", "Tenant portion", "Assistance", "Extra", "Check #", "Collected", "Variance", "Status", "Notes"].map((h, i) => (
+                  <th key={h} style={{ ...S.th, textAlign: i >= 2 && i <= 9 ? "right" : "left" }}>{h}</th>
                 ))}
               </tr>
             </thead>
@@ -872,6 +874,7 @@ function Collections({ roll, monthLabel, setPay, parking = [], parkingRec = {}, 
                   <td style={{ ...S.td, textAlign: "right" }}><NumCell value={pay.govt} onCommit={(v) => setPay(t.id, "govt", v)} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><NumCell value={pay.portion} onCommit={(v) => setPay(t.id, "portion", v)} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><NumCell value={pay.assistance} onCommit={(v) => setPay(t.id, "assistance", v)} /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><NumCell value={pay.extra} onCommit={(v) => setPay(t.id, "extra", v)} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}>
                     <TextCell value={pay.check_num} onCommit={(v) => setPay(t.id, "check_num", v)} />
                   </td>
@@ -890,6 +893,7 @@ function Collections({ roll, monthLabel, setPay, parking = [], parkingRec = {}, 
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.expected} bold /></td>
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.govtTotal} bold /></td>
                 <td style={{ ...S.td, textAlign: "right" }} colSpan={2}><Money v={roll.tenantTotal} bold /></td>
+                <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.extraTotal} bold /></td>
                 <td style={S.td}></td>
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.collected} bold /></td>
                 <td style={{ ...S.td, textAlign: "right" }}><Variance v={-roll.outstanding} /></td>
@@ -956,6 +960,7 @@ function CollectCard({ t, r, pay, setPay }) {
         <Labeled label="Govt (HAP)"><NumCell value={pay.govt} onCommit={(v) => setPay(t.id, "govt", v)} full /></Labeled>
         <Labeled label="Tenant portion"><NumCell value={pay.portion} onCommit={(v) => setPay(t.id, "portion", v)} full /></Labeled>
         <Labeled label="Assistance"><NumCell value={pay.assistance} onCommit={(v) => setPay(t.id, "assistance", v)} full /></Labeled>
+        <Labeled label="Extra"><NumCell value={pay.extra} onCommit={(v) => setPay(t.id, "extra", v)} full /></Labeled>
         <Labeled label="Check #"><TextCell value={pay.check_num} onCommit={(v) => setPay(t.id, "check_num", v)} full /></Labeled>
       </div>
       <div style={{ marginTop: 10 }}>

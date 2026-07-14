@@ -73,10 +73,11 @@ create table if not exists payments (
   govt         numeric(10,2) not null default 0,
   portion      numeric(10,2) not null default 0,
   assistance   numeric(10,2) not null default 0,
+  extra        numeric(10,2) not null default 0,   -- extra / other payment collected
   check_num    text,
   bank_confirm boolean not null default false,
   notes        text,
-  total        numeric(10,2) generated always as (govt + portion + assistance) stored,
+  total        numeric(10,2) generated always as (govt + portion + assistance + extra) stored,
   updated_at   timestamptz not null default now(),
   updated_by   uuid references auth.users(id),
   unique (tenant_id, month)
@@ -150,7 +151,7 @@ create index if not exists notes_tenant_idx on notes(tenant_id);
 create or replace view payment_status as
 select
   p.id, p.tenant_id, t.name, t.unit, t.program, p.month,
-  p.govt, p.portion, p.assistance, p.total,
+  p.govt, p.portion, p.assistance, p.extra, p.total,
   t.lease_rent,
   (p.total - t.lease_rent)                         as variance,
   p.check_num, p.bank_confirm, p.notes,
