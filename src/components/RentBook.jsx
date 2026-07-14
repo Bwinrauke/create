@@ -1734,6 +1734,9 @@ function Parking({ parking, parkingRec, monthLabel, setReceived, tenants = [], p
 /* One parking spot's received-amount entry for the month (reconciled, not automatic). */
 function ParkingRow({ p, received, onCommit, onEdit, tenantLabel, last }) {
   const expected = +p.amount || 0;
+  // "In rent" spots are driven by the tenant's rent status (a DB trigger keeps
+  // them in sync), so they're shown read-only here.
+  const inRent = p.method === "In rent" && !!p.tenant_id;
   const status = received <= 0.001 ? "owed" : received + 0.5 >= expected ? "paid" : "partial";
   return (
     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "13px 18px", borderBottom: last ? "none" : "1px solid #f2eee5" }}>
@@ -1758,8 +1761,12 @@ function ParkingRow({ p, received, onCommit, onEdit, tenantLabel, last }) {
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
         <div style={{ textAlign: "right" }}>
-          <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 2 }}>Received</div>
-          <NumCell value={received || ""} onCommit={onCommit} />
+          <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 2 }}>{inRent ? "In rent · auto" : "Received"}</div>
+          {inRent ? (
+            <div title="Auto: paid when the tenant's rent is fully paid" style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, fontSize: 13, color: received > 0.5 ? "#1c2836" : "#9a958c", minWidth: 84, textAlign: "right", padding: "7px 0" }}>{received > 0.5 ? money(received) : "—"}</div>
+          ) : (
+            <NumCell value={received || ""} onCommit={onCommit} />
+          )}
         </div>
         <Stamp status={status} />
         {onEdit && <button onClick={onEdit} style={{ ...S.iconBtn, color: "#b3ada1" }} title="Edit spot"><Pencil size={15} /></button>}
