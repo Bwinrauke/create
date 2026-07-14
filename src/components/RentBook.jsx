@@ -1,17 +1,29 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   Building2, LayoutDashboard, Receipt, Users, Grid3x3, Car,
   Check, Phone, Plus, X, Search, CalendarClock, Banknote, Pencil,
   ChevronRight, ChevronDown, Landmark, Wallet, LogOut, Trash2,
-  StickyNote, TrendingUp,
+  StickyNote, TrendingUp, Menu, Clock, AlertTriangle, Archive, MapPin,
 } from "lucide-react";
 import {
-  tenantsApi, parkingApi, paymentsApi, rentTermsApi, expensesApi, notesApi, authApi,
+  tenantsApi, parkingApi, paymentsApi, rentTermsApi, expensesApi, notesApi, authApi, realtime,
+  propertiesApi, auditApi,
 } from "../lib/db";
 import {
   S, MONTHS, STATUS, CURRENT_MONTH, EXPENSE_CATEGORIES, money, reconcile, buildLedger,
-  Money, Variance, Stamp, UnitChip, Legend, BigStat,
+  Money, Variance, Stamp, UnitChip, Legend, BigStat, useIsMobile,
 } from "../lib/ui";
+
+// True once `month` (a "YYYY-MM" key) has reached one calendar month before
+// `leaseStart`. Tenants with no lease start on file are always shown.
+function monthReached(leaseStart, month) {
+  if (!leaseStart) return true;
+  const [ly, lm] = leaseStart.slice(0, 7).split("-").map(Number);
+  const gy = lm === 1 ? ly - 1 : ly;
+  const gm = lm === 1 ? 12 : lm - 1;
+  const gate = `${gy}-${String(gm).padStart(2, "0")}`;
+  return month >= gate; // zero-padded YYYY-MM compares lexically
+}
 
 export default function RentBook({ session, role }) {
   const [view, setView] = useState("overview");
@@ -24,20 +36,29 @@ export default function RentBook({ session, role }) {
   const [rawPayments, setRawPayments] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [notes, setNotes] = useState([]);
+  const [audit, setAudit] = useState([]);
   const [editTenant, setEditTenant] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [live, setLive] = useState(false);
+  const [properties, setProperties] = useState([]);
+  const [propertyId, setPropertyId] = useState(null);
+  const [toast, setToast] = useState(null); // { kind: 'error'|'ok', text }
+  const isMobile = useIsMobile();
   const email = session?.user?.email || "";
+  const flash = useCallback((kind, text) => { setToast({ kind, text }); setTimeout(() => setToast(null), kind === "error" ? 6000 : 2500); }, []);
 
   const loadStatic = useCallback(async () => {
+    if (!propertyId) return;
     const [t, p, rt, ex, no] = await Promise.all([
-      tenantsApi.list(), parkingApi.list(), rentTermsApi.list(), expensesApi.list(), notesApi.list(),
+      tenantsApi.list(propertyId), parkingApi.list(propertyId), rentTermsApi.list(), expensesApi.list(propertyId), notesApi.list(propertyId),
     ]);
     setTenants(t.data || []);
     setParking(p.data || []);
     setRentTerms(rt.data || []);
     setExpenses(ex.data || []);
     setNotes(no.data || []);
-  }, []);
+  }, [propertyId]);
 
   const loadMonth = useCallback(async (m) => {
     const [st, pp] = await Promise.all([paymentsApi.statusForMonth(m), parkingApi.paidForMonth(m)]);
@@ -52,17 +73,63 @@ export default function RentBook({ session, role }) {
     setRawPayments(data || []);
   }, []);
 
+  const loadAudit = useCallback(async () => {
+    if (!propertyId) return;
+    const { data } = await auditApi.recent(propertyId, 200);
+    setAudit(data || []);
+  }, [propertyId]);
+
+  // Pick the active property once on mount (restoring the last choice).
   useEffect(() => {
+    (async () => {
+      const { data } = await propertiesApi.list();
+      const list = data || [];
+      setProperties(list);
+      const stored = typeof localStorage !== "undefined" ? localStorage.getItem("rb_property") : null;
+      const pid = (stored && list.some((p) => p.id === stored)) ? stored : (list[0]?.id || null);
+      setPropertyId(pid);
+      if (!pid) setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => { if (propertyId && typeof localStorage !== "undefined") localStorage.setItem("rb_property", propertyId); }, [propertyId]);
+
+  // Load the property's data whenever the active property changes.
+  useEffect(() => {
+    if (!propertyId) return;
     (async () => {
       setLoading(true);
       await loadStatic();
       await loadMonth(month);
       setLoading(false);
     })();
-  }, []); // eslint-disable-line
+  }, [propertyId]); // eslint-disable-line
 
   useEffect(() => { loadMonth(month); }, [month, loadMonth]);
   useEffect(() => { if (view === "ledger") loadLedger(); }, [view, loadLedger]);
+  useEffect(() => { if (view === "activity") loadAudit(); }, [view, loadAudit]);
+
+  // Live sync: subscribe once to Postgres change webhooks and reload only the
+  // slices a given change touches. Refs keep the subscription stable across
+  // month/view changes so we don't tear the websocket down and back up.
+  const monthRef = useRef(month);
+  const viewRef = useRef(view);
+  useEffect(() => { monthRef.current = month; }, [month]);
+  useEffect(() => { viewRef.current = view; }, [view]);
+
+  useEffect(() => {
+    const debounce = {};
+    const run = (key, fn) => { clearTimeout(debounce[key]); debounce[key] = setTimeout(fn, 250); };
+    const unsub = realtime.subscribe(
+      ({ table }) => {
+        if (["tenants", "rent_terms", "parking_spots", "expenses", "notes"].includes(table)) run("static", loadStatic);
+        if (["payments", "parking_payments"].includes(table)) run("month", () => loadMonth(monthRef.current));
+        if (["payments", "rent_terms"].includes(table) && viewRef.current === "ledger") run("ledger", loadLedger);
+      },
+      (status) => setLive(status === "SUBSCRIBED"),
+    );
+    return () => { Object.values(debounce).forEach(clearTimeout); unsub(); };
+  }, [loadStatic, loadMonth, loadLedger]);
 
   const activeTenants = useMemo(() => tenants.filter((t) => t.active !== false), [tenants]);
   const statusMap = useMemo(() => {
@@ -83,13 +150,17 @@ export default function RentBook({ session, role }) {
       bank_confirm: field === "bank_confirm" ? value : (cur.bank_confirm || false),
       notes: field === "notes" ? value : (cur.notes || ""),
     };
-    await paymentsApi.save(row);
+    const { error } = await paymentsApi.save(row);
+    if (error) { flash("error", `Couldn't save — ${error.message}. Try again.`); return; }
     await loadMonth(month);
-  }, [statusMap, month, loadMonth]);
+  }, [statusMap, month, loadMonth, flash]);
 
   const roll = useMemo(() => {
     let expected = 0, collected = 0, govtTotal = 0, tenantTotal = 0, paidCt = 0, partialCt = 0, owedCt = 0;
-    const rows = activeTenants.map((t) => {
+    // A tenant only enters the roll once the viewing month reaches one month
+    // before their lease start — or as soon as they have a payment that month.
+    const visible = activeTenants.filter((t) => monthReached(t.lease_start, month) || statusMap[t.id]);
+    const rows = visible.map((t) => {
       const s = statusMap[t.id];
       const r = s
         ? { govt: +s.govt, portion: +s.portion, assistance: +s.assistance, total: +s.total, rent: +s.lease_rent, variance: +s.variance, status: s.status }
@@ -102,7 +173,7 @@ export default function RentBook({ session, role }) {
       return { t, r, pay };
     });
     return { rows, expected, collected, govtTotal, tenantTotal, outstanding: expected - collected, paidCt, partialCt, owedCt };
-  }, [activeTenants, statusMap]);
+  }, [activeTenants, statusMap, month]);
 
   const leaseAlerts = useMemo(() => {
     const ref = new Date(month + "-01");
@@ -115,8 +186,9 @@ export default function RentBook({ session, role }) {
 
   const saveTenant = async (t) => {
     const payload = { ...t };
-    if (!payload.id) delete payload.id;
-    const { data } = await tenantsApi.upsert(payload);
+    if (!payload.id) { delete payload.id; payload.property_id = propertyId; }
+    const { data, error } = await tenantsApi.upsert(payload);
+    if (error) { flash("error", `Couldn't save tenant — ${error.message}`); return; }
     if (!t.id && data) {
       await rentTermsApi.add({
         tenant_id: data.id,
@@ -126,14 +198,28 @@ export default function RentBook({ session, role }) {
       });
     }
     await loadStatic();
+    flash("ok", "Tenant saved");
     setEditTenant(null);
   };
-  const deleteTenant = async (id) => { await tenantsApi.remove(id); await loadStatic(); setEditTenant(null); };
+  const archiveTenant = async (id, active) => {
+    const { error } = await tenantsApi.setActive(id, active);
+    if (error) { flash("error", error.message); return; }
+    await loadStatic();
+    flash("ok", active ? "Tenant reactivated" : "Tenant archived");
+    setEditTenant(null);
+  };
+  const deleteTenant = async (id) => {
+    const { error } = await tenantsApi.remove(id);
+    if (error) { flash("error", `Couldn't delete — ${error.message}`); return; }
+    await loadStatic();
+    flash("ok", "Tenant deleted");
+    setEditTenant(null);
+  };
   const addTerm = async (row) => { await rentTermsApi.add(row); await loadStatic(); };
   const removeTerm = async (id) => { await rentTermsApi.remove(id); await loadStatic(); };
-  const addExpense = async (row) => { await expensesApi.add(row); await loadStatic(); };
+  const addExpense = async (row) => { const { error } = await expensesApi.add({ ...row, property_id: propertyId }); if (error) return flash("error", error.message); await loadStatic(); };
   const removeExpense = async (id) => { await expensesApi.remove(id); await loadStatic(); };
-  const addNote = async (row) => { await notesApi.add({ ...row, author_email: email }); await loadStatic(); };
+  const addNote = async (row) => { const { error } = await notesApi.add({ ...row, author_email: email, property_id: propertyId }); if (error) return flash("error", error.message); await loadStatic(); };
   const removeNote = async (id) => { await notesApi.remove(id); await loadStatic(); };
   const toggleParking = async (spotId) => {
     const next = !parkingPaid[spotId];
@@ -149,62 +235,116 @@ export default function RentBook({ session, role }) {
     { id: "tenants", label: "Tenants", icon: Users },
     { id: "parking", label: "Parking", icon: Car },
     { id: "log", label: "Log", icon: StickyNote },
+    { id: "activity", label: "Activity", icon: Clock },
   ];
+  const activeProperty = properties.find((p) => p.id === propertyId);
   const monthLabel = MONTHS.find((m) => m.key === month)?.label || month;
   const modalTerms = editTenant && editTenant !== "new" ? rentTerms.filter((rt) => rt.tenant_id === editTenant.id) : [];
   const modalNotes = editTenant && editTenant !== "new" ? notes.filter((n) => n.tenant_id === editTenant.id) : [];
   const buildingNotes = useMemo(() => notes.filter((n) => !n.tenant_id), [notes]);
 
+  const go = (id) => { setView(id); setDrawerOpen(false); };
+
+  // Shared dark-panel contents — rendered in the desktop sidebar and the mobile drawer.
+  const railInner = (
+    <>
+      <div style={{ padding: "22px 20px 16px", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={S.brassPlaque}><Building2 size={18} color="#1a222e" /></div>
+          <div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: "#f4f1ea" }}>Rent Book</div>
+            <div style={{ fontSize: 11, color: "#8b93a1", display: "flex", alignItems: "center", gap: 6 }}>{activeTenants.length} units <LiveDot live={live} /></div>
+          </div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          {properties.length > 1 ? (
+            <select value={propertyId || ""} onChange={(e) => setPropertyId(e.target.value)} style={{
+              width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.14)",
+              background: "rgba(255,255,255,.05)", color: "#f4f1ea", fontFamily: "'Space Grotesk',sans-serif",
+              fontWeight: 600, fontSize: 13,
+            }}>
+              {properties.map((p) => <option key={p.id} value={p.id} style={{ color: "#1c2836" }}>{p.name}</option>)}
+            </select>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 10px", borderRadius: 8, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)" }}>
+              <MapPin size={13} color="#b8892b" />
+              <span style={{ fontSize: 12.5, color: "#d7dce3", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{activeProperty?.name || "—"}</span>
+            </div>
+          )}
+        </div>
+      </div>
+      <nav style={{ padding: "14px 12px", flex: 1, overflowY: "auto" }}>
+        {NAV.map((n) => {
+          const on = view === n.id; const Icon = n.icon;
+          return (
+            <button key={n.id} onClick={() => go(n.id)} style={{
+              ...S.navBtn, background: on ? "rgba(184,137,43,.16)" : "transparent",
+              color: on ? "#f4d488" : "#aeb6c2", borderLeft: on ? "2px solid #b8892b" : "2px solid transparent",
+            }}>
+              <Icon size={17} /> {n.label}
+            </button>
+          );
+        })}
+      </nav>
+      <div style={{ padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,.08)" }}>
+        <div style={{ fontSize: 11.5, color: "#8b93a1", marginBottom: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+          {email} · {role}
+        </div>
+        <button onClick={() => authApi.signOut()} style={{ ...S.navBtn, color: "#aeb6c2", padding: "8px 10px" }}>
+          <LogOut size={15} /> Sign out
+        </button>
+      </div>
+    </>
+  );
+
   return (
-    <div style={S.page}>
-      <aside style={S.sidebar}>
-        <div style={{ padding: "22px 20px 18px", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <div style={S.brassPlaque}><Building2 size={18} color="#1a222e" /></div>
-            <div>
-              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: "#f4f1ea" }}>2137 Rent Book</div>
-              <div style={{ fontSize: 11, color: "#8b93a1" }}>FDOR · {activeTenants.length} units</div>
+    <div style={{ ...S.page, flexDirection: isMobile ? "column" : "row" }}>
+      {!isMobile && <aside style={S.sidebar}>{railInner}</aside>}
+
+      {isMobile && (
+        <header style={S.mtopbar}>
+          <button onClick={() => setDrawerOpen(true)} style={S.hamburger} aria-label="Open menu"><Menu size={20} /></button>
+          <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0, flex: 1 }}>
+            <div style={S.brassPlaque}><Building2 size={16} color="#1a222e" /></div>
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: "#f4f1ea", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{NAV.find((n) => n.id === view)?.label}</div>
+              <div style={{ fontSize: 10.5, color: "#8b93a1", display: "flex", alignItems: "center", gap: 5 }}>{activeProperty?.name || "Rent Book"} <LiveDot live={live} /></div>
             </div>
           </div>
+          <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ ...S.monthSelect, padding: "7px 8px", fontSize: 12.5 }}>
+            {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+          </select>
+        </header>
+      )}
+
+      {isMobile && drawerOpen && (
+        <div style={S.drawerOverlay} onClick={() => setDrawerOpen(false)}>
+          <aside style={S.drawer} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "flex-end", padding: "10px 10px 0" }}>
+              <button onClick={() => setDrawerOpen(false)} style={{ ...S.iconBtn, color: "#aeb6c2" }} aria-label="Close menu"><X size={20} /></button>
+            </div>
+            {railInner}
+          </aside>
         </div>
-        <nav style={{ padding: "14px 12px", flex: 1 }}>
-          {NAV.map((n) => {
-            const on = view === n.id; const Icon = n.icon;
-            return (
-              <button key={n.id} onClick={() => setView(n.id)} style={{
-                ...S.navBtn, background: on ? "rgba(184,137,43,.16)" : "transparent",
-                color: on ? "#f4d488" : "#aeb6c2", borderLeft: on ? "2px solid #b8892b" : "2px solid transparent",
-              }}>
-                <Icon size={17} /> {n.label}
-              </button>
-            );
-          })}
-        </nav>
-        <div style={{ padding: "14px 16px", borderTop: "1px solid rgba(255,255,255,.08)" }}>
-          <div style={{ fontSize: 11.5, color: "#8b93a1", marginBottom: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
-            {email} · {role}
-          </div>
-          <button onClick={() => authApi.signOut()} style={{ ...S.navBtn, color: "#aeb6c2", padding: "8px 10px" }}>
-            <LogOut size={15} /> Sign out
-          </button>
-        </div>
-      </aside>
+      )}
 
       <main style={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
-        <header style={S.topbar}>
-          <div>
-            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "#1c2836" }}>{NAV.find((n) => n.id === view)?.label}</div>
-            <div style={{ fontSize: 12.5, color: "#8a8681", marginTop: 1 }}>Building 2137 · subsidized rent roll</div>
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <CalendarClock size={16} color="#8a8681" />
-            <select value={month} onChange={(e) => setMonth(e.target.value)} style={S.monthSelect}>
-              {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-            </select>
-          </div>
-        </header>
+        {!isMobile && (
+          <header style={S.topbar}>
+            <div>
+              <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "#1c2836" }}>{NAV.find((n) => n.id === view)?.label}</div>
+              <div style={{ fontSize: 12.5, color: "#8a8681", marginTop: 1 }}>{activeProperty?.name || "Rent roll"} · subsidized rent roll</div>
+            </div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <CalendarClock size={16} color="#8a8681" />
+              <select value={month} onChange={(e) => setMonth(e.target.value)} style={S.monthSelect}>
+                {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+              </select>
+            </div>
+          </header>
+        )}
 
-        <div style={{ flex: 1, overflow: "auto", padding: "24px 28px 60px" }}>
+        <div style={{ flex: 1, overflow: "auto", padding: isMobile ? "16px 14px 88px" : "24px 28px 60px" }}>
           {loading ? (
             <div style={{ color: "#8a8681", fontFamily: "'Space Grotesk',sans-serif", padding: 40 }}>Loading the rent book…</div>
           ) : (
@@ -216,6 +356,7 @@ export default function RentBook({ session, role }) {
               {view === "tenants" && <Tenants tenants={tenants} onEdit={setEditTenant} onAdd={() => setEditTenant("new")} />}
               {view === "parking" && <Parking parking={parking} parkingPaid={parkingPaid} monthLabel={monthLabel} toggle={toggleParking} />}
               {view === "log" && <LogTab notes={buildingNotes} onAdd={(body) => addNote({ tenant_id: null, body })} onRemove={removeNote} />}
+              {view === "activity" && <Activity rows={audit} tenants={tenants} onRefresh={loadAudit} />}
             </>
           )}
         </div>
@@ -226,21 +367,138 @@ export default function RentBook({ session, role }) {
           tenant={editTenant === "new" ? null : editTenant}
           terms={modalTerms}
           tenantNotes={modalNotes}
+          propertyId={propertyId}
           onClose={() => setEditTenant(null)}
           onSave={saveTenant}
           onDelete={deleteTenant}
+          onArchive={archiveTenant}
           onAddTerm={addTerm}
           onRemoveTerm={removeTerm}
           onAddNote={(body, tid) => addNote({ tenant_id: tid, body })}
           onRemoveNote={removeNote}
+          onParkingChanged={loadStatic}
+          flash={flash}
         />
       )}
+
+      {toast && (
+        <div style={{
+          position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", zIndex: 90,
+          display: "flex", alignItems: "center", gap: 9, padding: "11px 16px", borderRadius: 10,
+          background: toast.kind === "error" ? "#3a2320" : "#173a2a", color: toast.kind === "error" ? "#f3c0b8" : "#a6e0c2",
+          border: `1px solid ${toast.kind === "error" ? "#7a3b32" : "#2c6146"}`, boxShadow: "0 10px 34px rgba(0,0,0,.28)",
+          fontSize: 13.5, fontWeight: 500, maxWidth: "92vw",
+        }}>
+          {toast.kind === "error" ? <AlertTriangle size={16} /> : <Check size={16} />}
+          {toast.text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* Live-sync status pip — green + subtle glow when the realtime websocket is connected. */
+function LiveDot({ live }) {
+  return (
+    <span title={live ? "Live sync on — changes from other devices appear instantly" : "Connecting live sync…"}
+      style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+      <span style={{ width: 6, height: 6, borderRadius: "50%", background: live ? "#12a06e" : "#8b93a1", boxShadow: live ? "0 0 0 3px rgba(18,160,110,.2)" : "none" }} />
+      <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: live ? "#5fcf9e" : "#8b93a1" }}>{live ? "Live" : "…"}</span>
+    </span>
+  );
+}
+
+/* ================= ACTIVITY (change log by user) ================= */
+const auditFmt = (v) => {
+  if (v === null || v === undefined || v === "") return "—";
+  if (v === true) return "yes"; if (v === false) return "no";
+  if (typeof v === "number" || (/^\d+(\.\d+)?$/.test(v))) return money(v);
+  return String(v);
+};
+function timeAgo(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+function Activity({ rows, tenants, onRefresh }) {
+  const [q, setQ] = useState("");
+  const [type, setType] = useState("all");
+  const tmap = useMemo(() => { const m = {}; tenants.forEach((t) => { m[t.id] = t; }); return m; }, [tenants]);
+
+  const describe = (r) => {
+    const d = r.new_data || r.old_data || {};
+    const verb = r.action === "INSERT" ? "added" : r.action === "DELETE" ? "removed" : "updated";
+    let target = r.table_name, detail = "";
+    if (r.table_name === "payments") {
+      const t = tmap[d.tenant_id];
+      target = `${t ? `${t.unit} · ${t.name}` : "Payment"} — ${d.month || ""}`;
+      if (r.action === "UPDATE" && r.old_data && r.new_data) {
+        detail = ["govt", "portion", "assistance", "check_num", "bank_confirm", "notes"]
+          .filter((f) => String(r.old_data[f] ?? "") !== String(r.new_data[f] ?? ""))
+          .map((f) => `${f}: ${auditFmt(r.old_data[f])} → ${auditFmt(r.new_data[f])}`).join(" · ");
+      }
+    } else if (r.table_name === "tenants") { target = d.name ? `${d.unit || ""} · ${d.name}` : "Tenant"; }
+    else if (r.table_name === "parking_spots") { const t = tmap[d.tenant_id]; target = `Parking ${d.spot || ""}${t ? ` · ${t.name}` : ""}`; }
+    else if (r.table_name === "parking_payments") { target = `Parking payment — ${d.month || ""}`; }
+    else if (r.table_name === "rent_terms") { const t = tmap[d.tenant_id]; target = `Rent term${t ? ` · ${t.name}` : ""}`; }
+    else if (r.table_name === "expenses") { target = `Expense${d.vendor ? ` · ${d.vendor}` : ""}${d.amount ? ` (${money(d.amount)})` : ""}`; }
+    else if (r.table_name === "notes") { target = "Note"; }
+    else if (r.table_name === "properties") { target = `Property ${d.name || ""}`; }
+    return { verb, target, detail };
+  };
+
+  const types = ["all", "payments", "tenants", "parking_spots", "expenses", "rent_terms", "notes"];
+  const filtered = rows.filter((r) => (type === "all" || r.table_name === type) &&
+    (!q || JSON.stringify(r).toLowerCase().includes(q.toLowerCase())));
+  const color = (a) => a === "INSERT" ? "#0f7a54" : a === "DELETE" ? "#a83232" : "#8a6a1e";
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 200, maxWidth: 340 }}>
+          <Search size={15} color="#a8a294" style={{ position: "absolute", left: 12, top: 11 }} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search changes, tenants, users"
+            style={{ ...S.cellInput, width: "100%", padding: "9px 12px 9px 34px", fontFamily: "'Inter',sans-serif" }} />
+        </div>
+        <select value={type} onChange={(e) => setType(e.target.value)} style={S.monthSelect}>
+          {types.map((t) => <option key={t} value={t}>{t === "all" ? "All records" : t.replace("_", " ")}</option>)}
+        </select>
+        <button onClick={onRefresh} style={S.ghostBtn}>Refresh</button>
+      </div>
+      <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "13px 18px", borderBottom: "1px solid #eee9df", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={S.cardTitle}>Change log</div>
+          <div style={{ fontSize: 12, color: "#8a8681" }}>{filtered.length} of {rows.length} · newest first</div>
+        </div>
+        {filtered.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", color: "#8a8681", fontSize: 13 }}>No matching activity yet. Every create, edit, and delete is recorded here.</div>
+        ) : filtered.map((r) => {
+          const { verb, target, detail } = describe(r);
+          return (
+            <div key={r.id} style={{ display: "flex", gap: 12, padding: "12px 18px", borderBottom: "1px solid #f2eee5", alignItems: "flex-start" }}>
+              <span style={{ marginTop: 3, width: 8, height: 8, borderRadius: "50%", background: color(r.action), flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, color: "#1c2836" }}>
+                  <b style={{ fontWeight: 600 }}>{r.actor_email || "System"}</b>
+                  <span style={{ color: "#6b6b66" }}> {verb} </span>
+                  <b style={{ fontWeight: 600 }}>{target}</b>
+                </div>
+                {detail && <div style={{ fontSize: 12, color: "#8a6a1e", fontFamily: "'IBM Plex Mono',monospace", marginTop: 3, wordBreak: "break-word" }}>{detail}</div>}
+              </div>
+              <div style={{ fontSize: 11.5, color: "#a29d92", whiteSpace: "nowrap", flexShrink: 0 }}>{timeAgo(r.at)}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10 }}>
+        This log is append-only — every change is kept, and nothing here can be edited or deleted. It doubles as the version history for each entry.
+      </div>
     </div>
   );
 }
 
 /* ================= OVERVIEW ================= */
 function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, monthExpenses }) {
+  const isMobile = useIsMobile();
   const rate = roll.expected ? Math.round((roll.collected / roll.expected) * 100) : 0;
   const owedRows = roll.rows.filter((x) => x.r.status !== "paid");
   const n = Math.max(roll.rows.length, 1);
@@ -268,7 +526,7 @@ function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, mon
         <BigStat label="Net operating" value={money(net)} sub={`${money(totalIncome)} in − ${money(totalExpenses)} out`} accent={net >= 0 ? "#0f7a54" : "#a83232"} />
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 16, alignItems: "start" }}>
         <div style={S.card}>
           <div style={{ ...S.cardTitle, marginBottom: 14 }}>Income by source · {monthLabel}</div>
           {incomeRows.length === 0 ? (
@@ -322,7 +580,7 @@ function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, mon
         </div>
       </div>
 
-      <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 16, marginTop: 16, alignItems: "start" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1.4fr 1fr", gap: 16, marginTop: 16, alignItems: "start" }}>
         <div style={S.card}>
           <div style={{ ...S.cardTitle, marginBottom: 12, display: "flex", justifyContent: "space-between" }}>
             <span>Needs attention</span>
@@ -387,16 +645,26 @@ function PLRow({ label, v }) {
 
 /* ================= COLLECTIONS ================= */
 function Collections({ roll, monthLabel, setPay }) {
+  const isMobile = useIsMobile();
   return (
     <div>
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid #eee9df" }}>
+        <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", gap: isMobile ? 6 : 0, padding: "14px 18px", borderBottom: "1px solid #eee9df" }}>
           <div style={S.cardTitle}>Reconciliation · {monthLabel}</div>
           <div style={{ display: "flex", gap: 20, fontFamily: "'IBM Plex Mono',monospace", fontSize: 12.5 }}>
             <span style={{ color: "#8a8681" }}>Collected <b style={{ color: "#0f7a54" }}>{money(roll.collected)}</b></span>
             <span style={{ color: "#8a8681" }}>Outstanding <b style={{ color: roll.outstanding > 0.5 ? "#a83232" : "#0f7a54" }}>{money(roll.outstanding)}</b></span>
           </div>
         </div>
+        {isMobile ? (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            {roll.rows.map(({ t, r, pay }) => <CollectCard key={t.id} t={t} r={r} pay={pay} setPay={setPay} />)}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 4px 2px", borderTop: "2px solid #ece7dc", fontWeight: 700, fontSize: 13.5 }}>
+              <span>Totals · {roll.rows.length} units</span>
+              <Money v={roll.collected} bold size={15} />
+            </div>
+          </div>
+        ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
             <thead>
@@ -441,6 +709,7 @@ function Collections({ roll, monthLabel, setPay }) {
             </tfoot>
           </table>
         </div>
+        )}
       </div>
       <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
         <Pencil size={12} /> Edit any govt / portion / assistance figure — the database recomputes the total, variance, and status, and it syncs to everyone on the account.
@@ -449,23 +718,73 @@ function Collections({ roll, monthLabel, setPay }) {
   );
 }
 
-function NumCell({ value, onCommit }) {
+/* Mobile reconciliation card — one tenant, editable, with the figures that were
+   off-screen in the desktop table (collected, variance, status) up top. */
+function CollectCard({ t, r, pay, setPay }) {
+  return (
+    <div style={{ border: "1px solid #f0ece3", borderRadius: 10, padding: 12, background: "#fff" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ display: "flex", gap: 9, alignItems: "center", minWidth: 0 }}>
+          <UnitChip unit={t.unit} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#1c2836", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</div>
+            <div style={{ fontSize: 11.5, color: "#8a8681" }}>{t.program}</div>
+          </div>
+        </div>
+        <Stamp status={r.status} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, margin: "12px 0", padding: "10px 0", borderTop: "1px solid #f4f0e8", borderBottom: "1px solid #f4f0e8" }}>
+        <MiniFig label="Lease"><Money v={r.rent} dim size={13} /></MiniFig>
+        <MiniFig label="Collected"><Money v={r.total} bold size={13} /></MiniFig>
+        <MiniFig label="Variance"><Variance v={r.variance} /></MiniFig>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <Labeled label="Govt"><NumCell value={pay.govt} onCommit={(v) => setPay(t.id, "govt", v)} full /></Labeled>
+        <Labeled label="Tenant portion"><NumCell value={pay.portion} onCommit={(v) => setPay(t.id, "portion", v)} full /></Labeled>
+        <Labeled label="Assistance"><NumCell value={pay.assistance} onCommit={(v) => setPay(t.id, "assistance", v)} full /></Labeled>
+        <Labeled label="Check #"><TextCell value={pay.check_num} onCommit={(v) => setPay(t.id, "check_num", v)} full /></Labeled>
+      </div>
+    </div>
+  );
+}
+
+function NumCell({ value, onCommit, full }) {
   const [v, setV] = useState(value ?? "");
   useEffect(() => { setV(value ?? ""); }, [value]);
   return (
     <input value={v} onChange={(e) => setV(e.target.value)}
       onBlur={() => onCommit(v === "" ? 0 : parseFloat(v) || 0)}
       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      inputMode="decimal" placeholder="0.00" style={{ ...S.cellInput, width: 84, textAlign: "right" }} />
+      inputMode="decimal" placeholder="0.00"
+      style={{ ...S.cellInput, width: full ? "100%" : 84, textAlign: full ? "left" : "right", fontSize: full ? 16 : 13 }} />
   );
 }
-function TextCell({ value, onCommit }) {
+function TextCell({ value, onCommit, full }) {
   const [v, setV] = useState(value ?? "");
   useEffect(() => { setV(value ?? ""); }, [value]);
   return (
     <input value={v} onChange={(e) => setV(e.target.value)} onBlur={() => onCommit(v)}
       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      placeholder="—" style={{ ...S.cellInput, width: 92, textAlign: "right", fontSize: 12 }} />
+      placeholder="—"
+      style={{ ...S.cellInput, width: full ? "100%" : 92, textAlign: full ? "left" : "right", fontSize: full ? 16 : 12 }} />
+  );
+}
+
+/* Small labeled field + centered figure used by the mobile card variants. */
+function Labeled({ label, children }) {
+  return (
+    <label style={{ display: "block" }}>
+      <div style={{ fontSize: 10.5, color: "#8a8681", fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".03em" }}>{label}</div>
+      {children}
+    </label>
+  );
+}
+function MiniFig({ label, children }) {
+  return (
+    <div style={{ textAlign: "center" }}>
+      <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 3 }}>{label}</div>
+      {children}
+    </div>
   );
 }
 
@@ -481,6 +800,7 @@ function Bal({ v, size = 13 }) {
 }
 
 function Ledger({ tenants, terms, rawPayments }) {
+  const isMobile = useIsMobile();
   const rows = useMemo(() => buildLedger(tenants, terms, rawPayments, CURRENT_MONTH), [tenants, terms, rawPayments]);
   const [open, setOpen] = useState(null);
   const tenantArrears = rows.reduce((s, r) => s + Math.max(r.tenantBal, 0), 0);
@@ -496,10 +816,15 @@ function Ledger({ tenants, terms, rawPayments }) {
       </div>
 
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-        <div style={{ padding: "14px 18px", borderBottom: "1px solid #eee9df", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #eee9df", display: "flex", flexDirection: isMobile ? "column" : "row", gap: isMobile ? 4 : 0, justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center" }}>
           <div style={S.cardTitle}>Balances by tenant</div>
           <div style={{ fontSize: 12, color: "#8a8681" }}>Red = owed to you · (green) = credit / overpaid</div>
         </div>
+        {isMobile ? (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            {rows.map((row) => <LedgerCard key={row.t.id} row={row} isOpen={open === row.t.id} onToggle={() => setOpen(open === row.t.id ? null : row.t.id)} />)}
+          </div>
+        ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
             <thead>
@@ -544,10 +869,55 @@ function Ledger({ tenants, terms, rawPayments }) {
             </tbody>
           </table>
         </div>
+        )}
       </div>
       <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10 }}>
         Balances carry forward from the first month you logged. Govt and tenant shortfalls are tracked separately, so you know whether to chase the agency or the tenant.
       </div>
+    </div>
+  );
+}
+
+/* Mobile balance card — tap to expand a compact per-month running balance. */
+function LedgerCard({ row, isOpen, onToggle }) {
+  const { t, govtBal, tenantBal, totalBal, detail } = row;
+  return (
+    <div style={{ border: "1px solid #f0ece3", borderRadius: 10, overflow: "hidden", background: "#fff" }}>
+      <div onClick={onToggle} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: 12, cursor: "pointer" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+          <span style={{ color: "#a8a294", flexShrink: 0 }}>{isOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span>
+          <UnitChip unit={t.unit} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13.5, color: "#1c2836", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</div>
+            <div style={{ fontSize: 11, color: "#8a8681" }}>{t.program}</div>
+          </div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em" }}>Total owed</div>
+          <Bal v={totalBal} size={14} />
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: "0 12px 12px" }}>
+        <MiniFig label="Govt balance"><Bal v={govtBal} /></MiniFig>
+        <MiniFig label="Tenant balance"><Bal v={tenantBal} /></MiniFig>
+      </div>
+      {isOpen && (
+        detail.length === 0 ? (
+          <div style={{ padding: "10px 12px", borderTop: "1px solid #eee9df", background: "#fbfaf6", fontSize: 12.5, color: "#8a8681" }}>No months due yet for this tenant.</div>
+        ) : (
+          <div style={{ borderTop: "1px solid #eee9df", background: "#fbfaf6", padding: "8px 12px" }}>
+            {detail.map((d) => (
+              <div key={d.month} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", fontSize: 12 }}>
+                <span style={{ fontWeight: 600, color: "#5a5850" }}>{d.label}</span>
+                <span style={{ display: "flex", gap: 14 }}>
+                  <span style={{ color: "#8a8681" }}>Govt <Bal v={d.govtBal} size={12} /></span>
+                  <span style={{ color: "#8a8681" }}>Tenant <Bal v={d.tenantBal} size={12} /></span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )
+      )}
     </div>
   );
 }
@@ -586,6 +956,7 @@ function LedgerDetail({ detail }) {
 
 /* ================= EXPENSES ================= */
 function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, onRemove }) {
+  const isMobile = useIsMobile();
   const [scope, setScope] = useState("month");
   const shown = scope === "month" ? monthExpenses : expenses;
   const total = shown.reduce((s, e) => s + +e.amount, 0);
@@ -620,7 +991,7 @@ function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, 
       </div>
 
       {(catRows.length > 0 || venRows.length > 0) && (
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 16 }}>
+        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 16, marginBottom: 16 }}>
           <BreakdownCard title="By category" rows={catRows} total={total} />
           <BreakdownCard title="By vendor" rows={venRows} total={total} />
         </div>
@@ -630,6 +1001,10 @@ function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, 
         <div style={{ padding: "13px 18px", borderBottom: "1px solid #eee9df" }}><div style={S.cardTitle}>Entries</div></div>
         {shown.length === 0 ? (
           <div style={{ padding: 22, textAlign: "center", color: "#8a8681", fontSize: 13 }}>No expenses logged {scope === "month" ? `for ${monthLabel}` : "yet"}. Add one above.</div>
+        ) : isMobile ? (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            {shown.map((e) => <ExpenseCard key={e.id} e={e} onRemove={onRemove} />)}
+          </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
@@ -663,6 +1038,27 @@ function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, 
   );
 }
 
+/* Mobile expense card — the amount and delete action stay visible without scroll. */
+function ExpenseCard({ e, onRemove }) {
+  return (
+    <div style={{ border: "1px solid #f0ece3", borderRadius: 10, padding: 12, background: "#fff", display: "flex", justifyContent: "space-between", gap: 10 }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, background: "#f3f0e9", padding: "2px 8px", borderRadius: 5, color: "#5a5850" }}>{e.category}</span>
+          {e.unit ? <UnitChip unit={e.unit} /> : <span style={{ fontSize: 11.5, color: "#8a8681" }}>Building</span>}
+        </div>
+        <div style={{ fontWeight: 600, fontSize: 14, color: "#1c2836", marginTop: 6 }}>{e.vendor || "—"}</div>
+        {e.note && <div style={{ fontSize: 12.5, color: "#6b6b66", marginTop: 2 }}>{e.note}</div>}
+        <div style={{ fontSize: 11.5, color: "#8a8681", fontFamily: "'IBM Plex Mono',monospace", marginTop: 4 }}>{e.spent_on}</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "space-between", flexShrink: 0 }}>
+        <Money v={e.amount} bold />
+        <button onClick={() => onRemove(e.id)} style={{ ...S.iconBtn, color: "#b3ada1" }}><Trash2 size={14} /></button>
+      </div>
+    </div>
+  );
+}
+
 function BreakdownCard({ title, rows, total }) {
   return (
     <div style={S.card}>
@@ -683,6 +1079,7 @@ function BreakdownCard({ title, rows, total }) {
 }
 
 function ExpenseForm({ month, tenants, onAdd }) {
+  const isMobile = useIsMobile();
   const today = `${month}-01`;
   const [f, setF] = useState({ spent_on: today, amount: "", category: "Repairs", vendor: "", unit: "", note: "" });
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
@@ -702,7 +1099,7 @@ function ExpenseForm({ month, tenants, onAdd }) {
   return (
     <div style={S.card}>
       <div style={{ ...S.cardTitle, marginBottom: 14 }}>Log an expense</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1.2fr 1.2fr 1fr", gap: 10, alignItems: "end" }}>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1.1fr 1fr 1.2fr 1.2fr 1fr", gap: 10, alignItems: "end" }}>
         <FormField label="Date"><input style={S.field} type="date" value={f.spent_on} onChange={(e) => set("spent_on", e.target.value)} /></FormField>
         <FormField label="Amount"><input style={S.field} inputMode="decimal" placeholder="0.00" value={f.amount} onChange={(e) => set("amount", e.target.value)} /></FormField>
         <FormField label="Category">
@@ -784,38 +1181,102 @@ function MiniStat({ icon: Icon, label, v, strong }) {
   );
 }
 
-function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, onAddTerm, onRemoveTerm, onAddNote, onRemoveNote }) {
+const PROGRAMS = ["Section 8", "CityFHEPS", "FHEPS", "Shelter/FHEPS", "HASA", "SCRIE/DRIE", "Other"];
+
+function FormSection({ children }) {
+  return (
+    <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+      <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 11.5, color: "#8a6a1e", textTransform: "uppercase", letterSpacing: ".06em", whiteSpace: "nowrap" }}>{children}</span>
+      <span style={{ flex: 1, height: 1, background: "#eee9df" }} />
+    </div>
+  );
+}
+
+function TenantModal({ tenant, terms, tenantNotes, propertyId, onClose, onSave, onDelete, onArchive, onAddTerm, onRemoveTerm, onAddNote, onRemoveNote, onParkingChanged, flash }) {
+  const isMobile = useIsMobile();
   const [f, setF] = useState(tenant || {
-    name: "", unit: "", beds: "2BR", lease_rent: 0, deposit: 0, lease_start: "", lease_end: "",
-    program: "Section 8", govt_default: 0, portion_default: 0, phone: "", active: true,
+    name: "", unit: "", beds: "2BR", lease_rent: 0, deposit: 0, lease_start: "", lease_end: "", move_in_date: "",
+    program: "Section 8", govt_default: 0, portion_default: 0, phone: "", alt_phone: "", email: "",
+    mailing_address: "", emergency_name: "", emergency_phone: "", household_size: "",
+    voucher_number: "", pha_name: "", pha_contact: "", hap_contract_start: "", hap_contract_end: "", recert_due: "",
+    active: true,
   });
+  const [confirmDel, setConfirmDel] = useState(false);
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const num = (k, v) => set(k, v === "" ? 0 : parseFloat(v) || 0);
+  const splitSum = (+f.govt_default || 0) + (+f.portion_default || 0);
+  const splitOff = Math.abs(splitSum - (+f.lease_rent || 0)) > 0.5;
   const clean = () => {
     const out = { ...f };
-    ["lease_start", "lease_end"].forEach((k) => { if (!out[k]) out[k] = null; });
+    ["lease_start", "lease_end", "move_in_date", "hap_contract_start", "hap_contract_end", "recert_due"].forEach((k) => { if (!out[k]) out[k] = null; });
+    out.household_size = out.household_size === "" || out.household_size == null ? null : parseInt(out.household_size, 10) || null;
     return out;
   };
+  const grid = { display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12 };
+
   return (
     <div style={S.overlay} onClick={onClose}>
-      <div style={S.modal} onClick={(e) => e.stopPropagation()}>
+      <div style={{ ...S.modal, width: 640 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: "#1c2836" }}>{tenant ? "Edit tenant" : "New tenant"}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: "#1c2836" }}>{tenant ? "Edit tenant" : "New tenant"}</div>
+            {tenant && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px", borderRadius: 6, background: f.active ? "#e3f3ec" : "#efece5", color: f.active ? "#0f7a54" : "#8a8681", fontSize: 11.5, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", fontFamily: "'Space Grotesk',sans-serif" }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: f.active ? "#12a06e" : "#b3ada1" }} />
+                {f.active ? "Active" : "Archived"}
+              </span>
+            )}
+          </div>
           <button onClick={onClose} style={S.iconBtn}><X size={18} /></button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+
+        <div style={grid}>
+          <FormSection>Identity &amp; contact</FormSection>
           <Field label="Tenant name" span={2}><input style={S.field} value={f.name} onChange={(e) => set("name", e.target.value)} /></Field>
-          <Field label="Unit"><input style={S.field} value={f.unit} onChange={(e) => set("unit", e.target.value)} /></Field>
-          <Field label="Bedrooms"><input style={S.field} value={f.beds} onChange={(e) => set("beds", e.target.value)} /></Field>
-          <Field label="Program"><input style={S.field} value={f.program} onChange={(e) => set("program", e.target.value)} /></Field>
           <Field label="Phone"><input style={S.field} value={f.phone || ""} onChange={(e) => set("phone", e.target.value)} /></Field>
-          <Field label="Lease rent"><input style={S.field} inputMode="decimal" value={f.lease_rent} onChange={(e) => num("lease_rent", e.target.value)} /></Field>
+          <Field label="Alt phone"><input style={S.field} value={f.alt_phone || ""} onChange={(e) => set("alt_phone", e.target.value)} /></Field>
+          <Field label="Email" span={2}><input style={S.field} type="email" value={f.email || ""} onChange={(e) => set("email", e.target.value)} /></Field>
+          <Field label="Mailing address" span={2}><input style={S.field} value={f.mailing_address || ""} onChange={(e) => set("mailing_address", e.target.value)} /></Field>
+          <Field label="Emergency contact"><input style={S.field} placeholder="Name" value={f.emergency_name || ""} onChange={(e) => set("emergency_name", e.target.value)} /></Field>
+          <Field label="Emergency phone"><input style={S.field} value={f.emergency_phone || ""} onChange={(e) => set("emergency_phone", e.target.value)} /></Field>
+          <Field label="Household size"><input style={S.field} inputMode="numeric" value={f.household_size ?? ""} onChange={(e) => set("household_size", e.target.value.replace(/[^0-9]/g, ""))} /></Field>
+
+          <FormSection>Unit &amp; lease</FormSection>
+          <Field label="Unit #"><input style={S.field} value={f.unit} onChange={(e) => set("unit", e.target.value)} /></Field>
+          <Field label="Bedrooms"><input style={S.field} value={f.beds} onChange={(e) => set("beds", e.target.value)} /></Field>
+          <Field label="Move-in date"><input style={S.field} type="date" value={f.move_in_date || ""} onChange={(e) => set("move_in_date", e.target.value)} /></Field>
           <Field label="Security deposit"><input style={S.field} inputMode="decimal" value={f.deposit} onChange={(e) => num("deposit", e.target.value)} /></Field>
-          <Field label="Govt share (current)"><input style={S.field} inputMode="decimal" value={f.govt_default} onChange={(e) => num("govt_default", e.target.value)} /></Field>
-          <Field label="Tenant share (current)"><input style={S.field} inputMode="decimal" value={f.portion_default} onChange={(e) => num("portion_default", e.target.value)} /></Field>
           <Field label="Lease start"><input style={S.field} type="date" value={f.lease_start || ""} onChange={(e) => set("lease_start", e.target.value)} /></Field>
           <Field label="Lease end"><input style={S.field} type="date" value={f.lease_end || ""} onChange={(e) => set("lease_end", e.target.value)} /></Field>
+
+          <FormSection>Subsidy &amp; program</FormSection>
+          <Field label="Program">
+            <select style={S.field} value={f.program} onChange={(e) => set("program", e.target.value)}>
+              {(PROGRAMS.includes(f.program) ? PROGRAMS : [f.program, ...PROGRAMS]).map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </Field>
+          <Field label="Voucher / case #"><input style={S.field} value={f.voucher_number || ""} onChange={(e) => set("voucher_number", e.target.value)} /></Field>
+          <Field label="Housing authority (PHA)"><input style={S.field} placeholder="e.g. NYCHA" value={f.pha_name || ""} onChange={(e) => set("pha_name", e.target.value)} /></Field>
+          <Field label="PHA contact"><input style={S.field} value={f.pha_contact || ""} onChange={(e) => set("pha_contact", e.target.value)} /></Field>
+          <Field label="HAP contract start"><input style={S.field} type="date" value={f.hap_contract_start || ""} onChange={(e) => set("hap_contract_start", e.target.value)} /></Field>
+          <Field label="HAP contract end"><input style={S.field} type="date" value={f.hap_contract_end || ""} onChange={(e) => set("hap_contract_end", e.target.value)} /></Field>
+          <Field label="Recertification due"><input style={S.field} type="date" value={f.recert_due || ""} onChange={(e) => set("recert_due", e.target.value)} /></Field>
+
+          <FormSection>Rent split (current default)</FormSection>
+          <Field label="Lease rent"><input style={S.field} inputMode="decimal" value={f.lease_rent} onChange={(e) => num("lease_rent", e.target.value)} /></Field>
+          <div />
+          <Field label="Govt share (HAP)"><input style={S.field} inputMode="decimal" value={f.govt_default} onChange={(e) => num("govt_default", e.target.value)} /></Field>
+          <Field label="Tenant share"><input style={S.field} inputMode="decimal" value={f.portion_default} onChange={(e) => num("portion_default", e.target.value)} /></Field>
+          {splitOff && (
+            <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#9a6511", display: "flex", alignItems: "center", gap: 6 }}>
+              <AlertTriangle size={13} /> Govt + tenant ({money(splitSum)}) doesn't equal lease rent ({money(f.lease_rent)}). Assistance/supplements may cover the gap.
+            </div>
+          )}
         </div>
+
+        {tenant && (
+          <TenantParking tenant={tenant} propertyId={propertyId} onChanged={onParkingChanged} flash={flash} isMobile={isMobile} />
+        )}
 
         <RentSchedule tenant={tenant} terms={terms} onAddTerm={onAddTerm} onRemoveTerm={onRemoveTerm} />
 
@@ -826,19 +1287,80 @@ function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, on
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 22 }}>
-          {tenant ? <button onClick={() => onDelete(f.id)} style={{ ...S.ghostBtn, color: "#a83232" }}>Remove</button> : <span />}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 22, gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            {tenant && (
+              <button onClick={() => onArchive(f.id, !f.active)} style={{ ...S.ghostBtn, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <Archive size={14} /> {f.active ? "Archive" : "Reactivate"}
+              </button>
+            )}
+            {tenant && (
+              confirmDel ? (
+                <button onClick={() => onDelete(f.id)} style={{ ...S.primaryBtn, background: "#a83232", color: "#fff" }}>Confirm delete</button>
+              ) : (
+                <button onClick={() => setConfirmDel(true)} style={{ ...S.ghostBtn, color: "#a83232" }}>Delete…</button>
+              )
+            )}
+          </div>
           <div style={{ display: "flex", gap: 10 }}>
             <button onClick={onClose} style={S.ghostBtn}>Cancel</button>
             <button onClick={() => onSave(clean())} style={S.primaryBtn}>Save tenant</button>
           </div>
         </div>
+        {confirmDel && <div style={{ fontSize: 12, color: "#a83232", marginTop: 8, textAlign: "right" }}>Deleting removes this tenant and all their payment history permanently. Prefer <b>Archive</b> to keep the record.</div>}
+      </div>
+    </div>
+  );
+}
+
+/* Parking spots owned by a tenant — add/remove, each with its own price + method. */
+function TenantParking({ tenant, propertyId, onChanged, flash, isMobile }) {
+  const [spots, setSpots] = useState([]);
+  const [nw, setNw] = useState({ spot: "", amount: "", method: "Zelle" });
+  const load = useCallback(async () => { const { data } = await parkingApi.forTenant(tenant.id); setSpots(data || []); }, [tenant.id]);
+  useEffect(() => { load(); }, [load]);
+  const add = async () => {
+    if (!nw.spot.trim()) return;
+    const { error } = await parkingApi.createSpot({
+      tenant_id: tenant.id, property_id: propertyId, name: tenant.name,
+      spot: nw.spot.trim(), amount: parseFloat(nw.amount) || 0, method: nw.method,
+    });
+    if (error) { flash?.("error", error.message); return; }
+    setNw({ spot: "", amount: "", method: "Zelle" }); await load(); onChanged?.();
+  };
+  const remove = async (id) => { const { error } = await parkingApi.removeSpot(id); if (error) { flash?.("error", error.message); return; } await load(); onChanged?.(); };
+  return (
+    <div style={{ marginTop: 18, borderTop: "1px solid #eee9df", paddingTop: 16 }}>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13.5, color: "#1c2836", marginBottom: 4 }}>Parking spots</div>
+      <div style={{ fontSize: 11.5, color: "#8a8681", marginBottom: 12 }}>A tenant can hold more than one spot, each with its own monthly price.</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+        {spots.length === 0 && <div style={{ fontSize: 12.5, color: "#8a8681" }}>No spots yet.</div>}
+        {spots.map((s) => (
+          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#faf8f3", padding: "8px 12px", borderRadius: 8 }}>
+            <div style={{ ...S.brassPlaque, background: "#eef1f4", width: 30, height: 30 }}><Car size={14} color="#5a6472" /></div>
+            <span style={{ fontWeight: 600, fontSize: 13, color: "#1c2836", minWidth: 60 }}>{s.spot}</span>
+            <span style={{ fontSize: 12.5, color: "#5a5850" }}><Money v={s.amount} size={12.5} /> · {s.method}</span>
+            <span style={{ flex: 1 }} />
+            <button onClick={() => remove(s.id)} style={{ ...S.iconBtn, color: "#b3ada1" }}><Trash2 size={14} /></button>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1.2fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
+        <Field label="Spot / lot"><input style={S.field} placeholder="e.g. Lot 3" value={nw.spot} onChange={(e) => setNw((p) => ({ ...p, spot: e.target.value }))} /></Field>
+        <Field label="Price"><input style={S.field} inputMode="decimal" placeholder="0" value={nw.amount} onChange={(e) => setNw((p) => ({ ...p, amount: e.target.value }))} /></Field>
+        <Field label="Method">
+          <select style={S.field} value={nw.method} onChange={(e) => setNw((p) => ({ ...p, method: e.target.value }))}>
+            {["Zelle", "Cash", "Check", "In rent", "Other"].map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+        <button onClick={add} style={{ ...S.primaryBtn, padding: "9px 14px" }}><Plus size={15} /></button>
       </div>
     </div>
   );
 }
 
 function RentSchedule({ tenant, terms, onAddTerm, onRemoveTerm }) {
+  const isMobile = useIsMobile();
   const [nt, setNt] = useState({ effective_from: "", lease_rent: "", govt_expected: "", tenant_expected: "" });
   const set = (k, v) => setNt((p) => ({ ...p, [k]: v }));
   const add = () => {
@@ -871,7 +1393,7 @@ function RentSchedule({ tenant, terms, onAddTerm, onRemoveTerm }) {
               </div>
             ))}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
+          <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1.1fr 1fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
             <Field label="Effective from"><input style={S.field} type="date" value={nt.effective_from} onChange={(e) => set("effective_from", e.target.value)} /></Field>
             <Field label="Rent"><input style={S.field} inputMode="decimal" placeholder="0" value={nt.lease_rent} onChange={(e) => set("lease_rent", e.target.value)} /></Field>
             <Field label="Govt"><input style={S.field} inputMode="decimal" placeholder="0" value={nt.govt_expected} onChange={(e) => set("govt_expected", e.target.value)} /></Field>

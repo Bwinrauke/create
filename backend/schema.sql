@@ -92,6 +92,52 @@ create table if not exists parking_payments (
 );
 
 -- ============================================================
+--  RENT TERMS  (effective-dated govt/tenant split per tenant)
+--  Each dated term sets the expected split from that date forward;
+--  the arrears ledger uses the earliest term as the tenant's start,
+--  so a tenant contributes no history before their lease begins.
+-- ============================================================
+create table if not exists rent_terms (
+  id              uuid primary key default gen_random_uuid(),
+  tenant_id       uuid not null references tenants(id) on delete cascade,
+  effective_from  date not null,
+  lease_rent      numeric(10,2) not null default 0,
+  govt_expected   numeric(10,2) not null default 0,
+  tenant_expected numeric(10,2) not null default 0,
+  note            text,
+  created_at      timestamptz not null default now()
+);
+create index if not exists rent_terms_tenant_idx on rent_terms(tenant_id, effective_from);
+
+-- ============================================================
+--  EXPENSES  (building- or unit-level spend)
+-- ============================================================
+create table if not exists expenses (
+  id         uuid primary key default gen_random_uuid(),
+  spent_on   date not null,
+  amount     numeric(10,2) not null default 0,
+  category   text,
+  vendor     text,
+  unit       text,
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists expenses_spent_on_idx on expenses(spent_on);
+
+-- ============================================================
+--  NOTES / LOG  (shared building + per-tenant notes)
+--  tenant_id null = building-wide log entry.
+-- ============================================================
+create table if not exists notes (
+  id           uuid primary key default gen_random_uuid(),
+  tenant_id    uuid references tenants(id) on delete cascade,
+  body         text not null,
+  author_email text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists notes_tenant_idx on notes(tenant_id);
+
+-- ============================================================
 --  VIEW: payment_status
 --  Joins payments to their tenant and computes the same logic
 --  your spreadsheet did: variance and paid/partial/owed status.
@@ -134,6 +180,9 @@ alter table tenants          enable row level security;
 alter table parking_spots    enable row level security;
 alter table payments         enable row level security;
 alter table parking_payments enable row level security;
+alter table rent_terms       enable row level security;
+alter table expenses         enable row level security;
+alter table notes            enable row level security;
 
 -- members: a signed-in user may see their own membership row;
 -- only an owner may add/remove members.
@@ -152,5 +201,148 @@ create policy payments_rw on payments
   for all using (is_member()) with check (is_member());
 create policy parking_pay_rw on parking_payments
   for all using (is_member()) with check (is_member());
+create policy rent_terms_rw on rent_terms
+  for all using (is_member()) with check (is_member());
+create policy expenses_rw on expenses
+  for all using (is_member()) with check (is_member());
+create policy notes_rw on notes
+  for all using (is_member()) with check (is_member());
+
+-- ============================================================
+--  REALTIME  (live sync)
+--  Add the data tables to Supabase's realtime publication so the
+--  app receives insert/update/delete events over the websocket and
+--  every signed-in device stays in sync without a refresh. RLS still
+--  applies to the stream, so non-members receive nothing.
+--  Idempotent and safe if some tables (rent_terms/expenses/notes)
+--  live in a separate migration.
+-- ============================================================
+do $$
+declare tbl text;
+begin
+  foreach tbl in array array[
+    'tenants','parking_spots','payments','parking_payments','rent_terms','expenses','notes','properties','audit_log'
+  ] loop
+    if to_regclass('public.' || tbl) is not null
+       and not exists (
+         select 1 from pg_publication_tables
+         where pubname = 'supabase_realtime' and schemaname = 'public' and tablename = tbl
+       ) then
+      execute format('alter publication supabase_realtime add table public.%I', tbl);
+    end if;
+  end loop;
+end $$;
+
+-- ============================================================
+--  PHASE 1 FOUNDATION  (additive; safe to re-run)
+--  Properties + scoping · parking-on-tenant · richer tenant
+--  fields · audit_log (change log by user) with triggers.
+-- ============================================================
+
+-- ---------- PROPERTIES ----------
+create table if not exists properties (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  code       text,
+  address    text,
+  created_at timestamptz not null default now()
+);
+alter table properties enable row level security;
+drop policy if exists properties_rw on properties;
+create policy properties_rw on properties for all using (is_member()) with check (is_member());
+
+-- one property to start (the 2137 building)
+insert into properties (name, code, address)
+select '2137 Building', '2137', null
+where not exists (select 1 from properties);
+
+-- scope entities to a property
+alter table tenants       add column if not exists property_id uuid references properties(id) on delete restrict;
+alter table parking_spots add column if not exists property_id uuid references properties(id) on delete restrict;
+alter table expenses      add column if not exists property_id uuid references properties(id) on delete restrict;
+alter table notes         add column if not exists property_id uuid references properties(id) on delete restrict;
+create index if not exists tenants_property_idx       on tenants(property_id);
+create index if not exists parking_spots_property_idx on parking_spots(property_id);
+
+-- ---------- PARKING belongs to a tenant (nullable → parking-only renters allowed) ----------
+alter table parking_spots add column if not exists tenant_id uuid references tenants(id) on delete set null;
+create index if not exists parking_spots_tenant_idx on parking_spots(tenant_id);
+
+-- ---------- Richer tenant fields ----------
+alter table tenants add column if not exists email              text;
+alter table tenants add column if not exists alt_phone          text;
+alter table tenants add column if not exists emergency_name     text;
+alter table tenants add column if not exists emergency_phone    text;
+alter table tenants add column if not exists household_size     int;
+alter table tenants add column if not exists move_in_date       date;
+alter table tenants add column if not exists mailing_address    text;
+alter table tenants add column if not exists voucher_number     text;
+alter table tenants add column if not exists pha_name           text;
+alter table tenants add column if not exists pha_contact        text;
+alter table tenants add column if not exists hap_contract_start date;
+alter table tenants add column if not exists hap_contract_end   date;
+alter table tenants add column if not exists recert_due         date;
+alter table tenants add column if not exists archived_at        timestamptz;
+
+-- backfill scoping to the first property (no-ops on a fresh, empty DB)
+update tenants       set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+update parking_spots set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+update expenses      set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+update notes         set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+
+-- ============================================================
+--  AUDIT LOG  (the change log by user)
+--  Append-only. Written only by the SECURITY DEFINER trigger.
+--  Members may read; nobody may edit or delete.
+-- ============================================================
+create table if not exists audit_log (
+  id          bigint generated always as identity primary key,
+  at          timestamptz not null default now(),
+  actor_id    uuid,
+  actor_email text,
+  action      text not null,            -- INSERT | UPDATE | DELETE
+  table_name  text not null,
+  row_id      uuid,
+  property_id uuid,
+  old_data    jsonb,
+  new_data    jsonb
+);
+create index if not exists audit_log_at_idx   on audit_log(at desc);
+create index if not exists audit_log_row_idx  on audit_log(table_name, row_id);
+create index if not exists audit_log_prop_idx on audit_log(property_id, at desc);
+
+alter table audit_log enable row level security;
+drop policy if exists audit_read on audit_log;
+create policy audit_read on audit_log for select using (is_member());
+-- (no write policies — clients can never insert/update/delete audit rows)
+
+create or replace function audit_capture() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  v_old jsonb := case when tg_op in ('UPDATE','DELETE') then to_jsonb(old) else null end;
+  v_new jsonb := case when tg_op in ('INSERT','UPDATE') then to_jsonb(new) else null end;
+  v_email text := coalesce(
+    nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'email',
+    (select email from members where user_id = auth.uid())
+  );
+begin
+  insert into audit_log(actor_id, actor_email, action, table_name, row_id, property_id, old_data, new_data)
+  values (
+    auth.uid(), v_email, tg_op, tg_table_name,
+    coalesce((v_new->>'id')::uuid, (v_old->>'id')::uuid),
+    coalesce((v_new->>'property_id')::uuid, (v_old->>'property_id')::uuid),
+    v_old, v_new
+  );
+  return coalesce(new, old);
+end $$;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['tenants','payments','parking_spots','parking_payments','rent_terms','expenses','notes','properties'] loop
+    execute format('drop trigger if exists trg_audit on public.%I', t);
+    execute format('create trigger trg_audit after insert or update or delete on public.%I for each row execute function audit_capture()', t);
+  end loop;
+end $$;
 
 -- Done. Next: run seed.sql to load the 2137 roster.
