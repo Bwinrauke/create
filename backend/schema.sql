@@ -221,7 +221,7 @@ do $$
 declare tbl text;
 begin
   foreach tbl in array array[
-    'tenants','parking_spots','payments','parking_payments','rent_terms','expenses','notes'
+    'tenants','parking_spots','payments','parking_payments','rent_terms','expenses','notes','properties','audit_log'
   ] loop
     if to_regclass('public.' || tbl) is not null
        and not exists (
@@ -230,6 +230,118 @@ begin
        ) then
       execute format('alter publication supabase_realtime add table public.%I', tbl);
     end if;
+  end loop;
+end $$;
+
+-- ============================================================
+--  PHASE 1 FOUNDATION  (additive; safe to re-run)
+--  Properties + scoping · parking-on-tenant · richer tenant
+--  fields · audit_log (change log by user) with triggers.
+-- ============================================================
+
+-- ---------- PROPERTIES ----------
+create table if not exists properties (
+  id         uuid primary key default gen_random_uuid(),
+  name       text not null,
+  code       text,
+  address    text,
+  created_at timestamptz not null default now()
+);
+alter table properties enable row level security;
+drop policy if exists properties_rw on properties;
+create policy properties_rw on properties for all using (is_member()) with check (is_member());
+
+-- one property to start (the 2137 building)
+insert into properties (name, code, address)
+select '2137 Building', '2137', null
+where not exists (select 1 from properties);
+
+-- scope entities to a property
+alter table tenants       add column if not exists property_id uuid references properties(id) on delete restrict;
+alter table parking_spots add column if not exists property_id uuid references properties(id) on delete restrict;
+alter table expenses      add column if not exists property_id uuid references properties(id) on delete restrict;
+alter table notes         add column if not exists property_id uuid references properties(id) on delete restrict;
+create index if not exists tenants_property_idx       on tenants(property_id);
+create index if not exists parking_spots_property_idx on parking_spots(property_id);
+
+-- ---------- PARKING belongs to a tenant (nullable → parking-only renters allowed) ----------
+alter table parking_spots add column if not exists tenant_id uuid references tenants(id) on delete set null;
+create index if not exists parking_spots_tenant_idx on parking_spots(tenant_id);
+
+-- ---------- Richer tenant fields ----------
+alter table tenants add column if not exists email              text;
+alter table tenants add column if not exists alt_phone          text;
+alter table tenants add column if not exists emergency_name     text;
+alter table tenants add column if not exists emergency_phone    text;
+alter table tenants add column if not exists household_size     int;
+alter table tenants add column if not exists move_in_date       date;
+alter table tenants add column if not exists mailing_address    text;
+alter table tenants add column if not exists voucher_number     text;
+alter table tenants add column if not exists pha_name           text;
+alter table tenants add column if not exists pha_contact        text;
+alter table tenants add column if not exists hap_contract_start date;
+alter table tenants add column if not exists hap_contract_end   date;
+alter table tenants add column if not exists recert_due         date;
+alter table tenants add column if not exists archived_at        timestamptz;
+
+-- backfill scoping to the first property (no-ops on a fresh, empty DB)
+update tenants       set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+update parking_spots set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+update expenses      set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+update notes         set property_id = (select id from properties order by created_at limit 1) where property_id is null;
+
+-- ============================================================
+--  AUDIT LOG  (the change log by user)
+--  Append-only. Written only by the SECURITY DEFINER trigger.
+--  Members may read; nobody may edit or delete.
+-- ============================================================
+create table if not exists audit_log (
+  id          bigint generated always as identity primary key,
+  at          timestamptz not null default now(),
+  actor_id    uuid,
+  actor_email text,
+  action      text not null,            -- INSERT | UPDATE | DELETE
+  table_name  text not null,
+  row_id      uuid,
+  property_id uuid,
+  old_data    jsonb,
+  new_data    jsonb
+);
+create index if not exists audit_log_at_idx   on audit_log(at desc);
+create index if not exists audit_log_row_idx  on audit_log(table_name, row_id);
+create index if not exists audit_log_prop_idx on audit_log(property_id, at desc);
+
+alter table audit_log enable row level security;
+drop policy if exists audit_read on audit_log;
+create policy audit_read on audit_log for select using (is_member());
+-- (no write policies — clients can never insert/update/delete audit rows)
+
+create or replace function audit_capture() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  v_old jsonb := case when tg_op in ('UPDATE','DELETE') then to_jsonb(old) else null end;
+  v_new jsonb := case when tg_op in ('INSERT','UPDATE') then to_jsonb(new) else null end;
+  v_email text := coalesce(
+    nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'email',
+    (select email from members where user_id = auth.uid())
+  );
+begin
+  insert into audit_log(actor_id, actor_email, action, table_name, row_id, property_id, old_data, new_data)
+  values (
+    auth.uid(), v_email, tg_op, tg_table_name,
+    coalesce((v_new->>'id')::uuid, (v_old->>'id')::uuid),
+    coalesce((v_new->>'property_id')::uuid, (v_old->>'property_id')::uuid),
+    v_old, v_new
+  );
+  return coalesce(new, old);
+end $$;
+
+do $$
+declare t text;
+begin
+  foreach t in array array['tenants','payments','parking_spots','parking_payments','rent_terms','expenses','notes','properties'] loop
+    execute format('drop trigger if exists trg_audit on public.%I', t);
+    execute format('create trigger trg_audit after insert or update or delete on public.%I for each row execute function audit_capture()', t);
   end loop;
 end $$;
 
