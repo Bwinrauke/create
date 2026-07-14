@@ -167,7 +167,7 @@ export default function RentBook({ session, role }) {
   }, [statusMap, month, loadMonth, flash]);
 
   const roll = useMemo(() => {
-    let expected = 0, collected = 0, govtTotal = 0, tenantTotal = 0, extraTotal = 0, paidCt = 0, partialCt = 0, owedCt = 0;
+    let expected = 0, collected = 0, govtTotal = 0, portionTotal = 0, assistanceTotal = 0, extraTotal = 0, paidCt = 0, partialCt = 0, owedCt = 0;
     // A tenant only enters the roll once the viewing month reaches one month
     // before their lease start — or as soon as they have a payment that month.
     const visible = activeTenants.filter((t) => monthReached(t.lease_start, month) || statusMap[t.id]);
@@ -179,11 +179,11 @@ export default function RentBook({ session, role }) {
       const pay = s
         ? { govt: s.govt, portion: s.portion, assistance: s.assistance, extra: s.extra, check_num: s.check_num, bank_confirm: s.bank_confirm, notes: s.notes }
         : {};
-      expected += r.rent; collected += r.total; govtTotal += r.govt; tenantTotal += r.portion + r.assistance; extraTotal += r.extra || 0;
+      expected += r.rent; collected += r.total; govtTotal += r.govt; portionTotal += r.portion; assistanceTotal += r.assistance; extraTotal += r.extra || 0;
       if (r.status === "paid") paidCt++; else if (r.status === "partial") partialCt++; else owedCt++;
       return { t, r, pay };
     });
-    return { rows, expected, collected, govtTotal, tenantTotal, extraTotal, outstanding: expected - collected, paidCt, partialCt, owedCt };
+    return { rows, expected, collected, govtTotal, portionTotal, assistanceTotal, extraTotal, outstanding: expected - collected, paidCt, partialCt, owedCt };
   }, [activeTenants, statusMap, month]);
 
   const leaseAlerts = useMemo(() => {
@@ -892,7 +892,8 @@ function Collections({ roll, monthLabel, setPay, parking = [], parkingRec = {}, 
                 <td style={{ ...S.td, fontWeight: 700 }} colSpan={2}>Totals · {roll.rows.length} units</td>
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.expected} bold /></td>
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.govtTotal} bold /></td>
-                <td style={{ ...S.td, textAlign: "right" }} colSpan={2}><Money v={roll.tenantTotal} bold /></td>
+                <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.portionTotal} bold /></td>
+                <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.assistanceTotal} bold /></td>
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.extraTotal} bold /></td>
                 <td style={S.td}></td>
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.collected} bold /></td>
