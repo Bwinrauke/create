@@ -22,16 +22,44 @@ export function useIsMobile(breakpoint = MOBILE_BP) {
 /* ---------------- constants ---------------- */
 export const CURRENT_MONTH = "2026-07";
 
-export const MONTHS = (() => {
+export const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+// Month keys are "YYYY-MM". These helpers let the app reach any month, not a fixed list.
+export const monthLabelFor = (key) => {
+  const [y, m] = key.split("-").map(Number);
+  return `${MONTH_NAMES[m - 1]} ${y}`;
+};
+export const addMonths = (key, n) => {
+  const [y, m] = key.split("-").map(Number);
+  const total = y * 12 + (m - 1) + n;
+  return `${Math.floor(total / 12)}-${String((total % 12) + 1).padStart(2, "0")}`;
+};
+export const monthRange = (startKey, endKey) => {
   const out = [];
-  let y = 2025, m = 7;
-  const names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  for (let i = 0; i < 20; i++) {
-    out.push({ key: `${y}-${String(m + 1).padStart(2, "0")}`, label: `${names[m]} ${y}` });
-    m++; if (m > 11) { m = 0; y++; }
-  }
+  let k = startKey;
+  for (let i = 0; k <= endKey && i < 600; i++) { out.push({ key: k, label: monthLabelFor(k) }); k = addMonths(k, 1); }
   return out;
-})();
+};
+export const thisMonthKey = () => {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+};
+
+// Period grouping for the Summary view.
+export const periodKeyFor = (monthKey, grouping) => {
+  const [y, m] = monthKey.split("-").map(Number);
+  if (grouping === "year") return `${y}`;
+  if (grouping === "quarter") return `${y}-Q${Math.floor((m - 1) / 3) + 1}`;
+  return monthKey;
+};
+export const periodLabelFor = (periodKey, grouping) => {
+  if (grouping === "year") return periodKey;
+  if (grouping === "quarter") { const [y, q] = periodKey.split("-Q"); return `Q${q} ${y}`; }
+  return monthLabelFor(periodKey);
+};
+
+// A generous default list (the app extends past it via prev/next navigation).
+export const MONTHS = monthRange("2025-07", addMonths("2025-07", 19));
 
 export const EXPENSE_CATEGORIES = [
   "Repairs", "Maintenance", "Utilities", "Water/Sewer", "Insurance",
@@ -81,7 +109,11 @@ export function buildLedger(tenants, terms, rawPayments, currentMonth) {
 
   const payMonths = rawPayments.map((p) => p.month).sort();
   const ledgerStart = payMonths[0] || currentMonth;
-  const monthsDue = MONTHS.filter((m) => m.key >= ledgerStart && m.key <= currentMonth);
+  // Run the ledger through whichever is latest: the requested month, the last
+  // month with data, or today — so added/future months are always included.
+  const lastPay = payMonths[payMonths.length - 1] || currentMonth;
+  const through = [currentMonth, lastPay, thisMonthKey()].sort().pop();
+  const monthsDue = monthRange(ledgerStart, through < ledgerStart ? ledgerStart : through);
 
   return tenants.map((t) => {
     const tterms = termsByTenant[t.id] || [];

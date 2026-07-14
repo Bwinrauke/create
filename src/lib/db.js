@@ -53,6 +53,7 @@ export const parkingApi = {
   updateSpot: (id, patch) => supabase.from("parking_spots").update(patch).eq("id", id).select().single(),
   removeSpot: (id) => supabase.from("parking_spots").delete().eq("id", id),
   paidForMonth: (month) => supabase.from("parking_payments").select("*").eq("month", month),
+  allPaid: () => supabase.from("parking_payments").select("spot_id, month, paid"),
   setPaid: (spot_id, month, paid) =>
     supabase.from("parking_payments").upsert({ spot_id, month, paid }, { onConflict: "spot_id,month" }),
 };
