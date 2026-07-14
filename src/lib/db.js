@@ -14,10 +14,22 @@ export const authApi = {
   },
 };
 
+/* ---------------- PROPERTIES ---------------- */
+export const propertiesApi = {
+  list: () => supabase.from("properties").select("*").order("created_at"),
+};
+
 /* ---------------- TENANTS ---------------- */
+// list is scoped to a property; upsert passes every column through (rich fields included).
 export const tenantsApi = {
-  list: () => supabase.from("tenants").select("*").order("unit"),
+  list: (propertyId) => {
+    let q = supabase.from("tenants").select("*").order("unit");
+    if (propertyId) q = q.eq("property_id", propertyId);
+    return q;
+  },
   upsert: (t) => supabase.from("tenants").upsert(t).select().single(),
+  setActive: (id, active) =>
+    supabase.from("tenants").update({ active, archived_at: active ? null : new Date().toISOString() }).eq("id", id),
   remove: (id) => supabase.from("tenants").delete().eq("id", id),
 };
 
@@ -29,8 +41,17 @@ export const rentTermsApi = {
 };
 
 /* ---------------- PARKING ---------------- */
+// Spots belong to a property and optionally to a tenant (a tenant may hold several).
 export const parkingApi = {
-  list: () => supabase.from("parking_spots").select("*").order("spot"),
+  list: (propertyId) => {
+    let q = supabase.from("parking_spots").select("*").order("spot");
+    if (propertyId) q = q.eq("property_id", propertyId);
+    return q;
+  },
+  forTenant: (tenantId) => supabase.from("parking_spots").select("*").eq("tenant_id", tenantId).order("spot"),
+  createSpot: (row) => supabase.from("parking_spots").insert(row).select().single(),
+  updateSpot: (id, patch) => supabase.from("parking_spots").update(patch).eq("id", id).select().single(),
+  removeSpot: (id) => supabase.from("parking_spots").delete().eq("id", id),
   paidForMonth: (month) => supabase.from("parking_payments").select("*").eq("month", month),
   setPaid: (spot_id, month, paid) =>
     supabase.from("parking_payments").upsert({ spot_id, month, paid }, { onConflict: "spot_id,month" }),
@@ -47,16 +68,38 @@ export const paymentsApi = {
 
 /* ---------------- EXPENSES ---------------- */
 export const expensesApi = {
-  list: () => supabase.from("expenses").select("*").order("spent_on", { ascending: false }),
+  list: (propertyId) => {
+    let q = supabase.from("expenses").select("*").order("spent_on", { ascending: false });
+    if (propertyId) q = q.eq("property_id", propertyId);
+    return q;
+  },
   add: (row) => supabase.from("expenses").insert(row).select().single(),
   remove: (id) => supabase.from("expenses").delete().eq("id", id),
 };
 
 /* ---------------- NOTES / LOG ---------------- */
 export const notesApi = {
-  list: () => supabase.from("notes").select("*").order("created_at", { ascending: false }),
+  list: (propertyId) => {
+    let q = supabase.from("notes").select("*").order("created_at", { ascending: false });
+    if (propertyId) q = q.eq("property_id", propertyId);
+    return q;
+  },
   add: (row) => supabase.from("notes").insert(row).select().single(),
   remove: (id) => supabase.from("notes").delete().eq("id", id),
+};
+
+/* ---------------- AUDIT LOG (change log by user) ----------------
+   audit_log is append-only and captures every insert/update/delete with the
+   actor, timestamp, and full before/after row. `recent` powers the Activity
+   feed; `forRow` powers a record's version history (e.g. one tenant's month). */
+export const auditApi = {
+  recent: (propertyId, limit = 200) => {
+    let q = supabase.from("audit_log").select("*").order("at", { ascending: false }).limit(limit);
+    if (propertyId) q = q.or(`property_id.eq.${propertyId},property_id.is.null`);
+    return q;
+  },
+  forRow: (table, rowId) =>
+    supabase.from("audit_log").select("*").eq("table_name", table).eq("row_id", rowId).order("at", { ascending: true }),
 };
 
 /* ---------------- REALTIME (live sync via Postgres change webhooks) ----------------
@@ -66,7 +109,7 @@ export const notesApi = {
    payload.table); onStatus reports the connection state ("SUBSCRIBED", etc.). */
 export const realtime = {
   // Tables the app reads. Each becomes a live channel.
-  TABLES: ["tenants", "rent_terms", "parking_spots", "parking_payments", "payments", "expenses", "notes"],
+  TABLES: ["tenants", "rent_terms", "parking_spots", "parking_payments", "payments", "expenses", "notes", "properties", "audit_log"],
   subscribe(onChange, onStatus) {
     if (!supabase) return () => {};
     const channel = supabase.channel("rentbook-live");

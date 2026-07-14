@@ -3,10 +3,11 @@ import {
   Building2, LayoutDashboard, Receipt, Users, Grid3x3, Car,
   Check, Phone, Plus, X, Search, CalendarClock, Banknote, Pencil,
   ChevronRight, ChevronDown, Landmark, Wallet, LogOut, Trash2,
-  StickyNote, TrendingUp, Menu,
+  StickyNote, TrendingUp, Menu, Clock, AlertTriangle, Archive, MapPin,
 } from "lucide-react";
 import {
   tenantsApi, parkingApi, paymentsApi, rentTermsApi, expensesApi, notesApi, authApi, realtime,
+  propertiesApi, auditApi,
 } from "../lib/db";
 import {
   S, MONTHS, STATUS, CURRENT_MONTH, EXPENSE_CATEGORIES, money, reconcile, buildLedger,
@@ -35,23 +36,29 @@ export default function RentBook({ session, role }) {
   const [rawPayments, setRawPayments] = useState([]);
   const [expenses, setExpenses] = useState([]);
   const [notes, setNotes] = useState([]);
+  const [audit, setAudit] = useState([]);
   const [editTenant, setEditTenant] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [live, setLive] = useState(false);
+  const [properties, setProperties] = useState([]);
+  const [propertyId, setPropertyId] = useState(null);
+  const [toast, setToast] = useState(null); // { kind: 'error'|'ok', text }
   const isMobile = useIsMobile();
   const email = session?.user?.email || "";
+  const flash = useCallback((kind, text) => { setToast({ kind, text }); setTimeout(() => setToast(null), kind === "error" ? 6000 : 2500); }, []);
 
   const loadStatic = useCallback(async () => {
+    if (!propertyId) return;
     const [t, p, rt, ex, no] = await Promise.all([
-      tenantsApi.list(), parkingApi.list(), rentTermsApi.list(), expensesApi.list(), notesApi.list(),
+      tenantsApi.list(propertyId), parkingApi.list(propertyId), rentTermsApi.list(), expensesApi.list(propertyId), notesApi.list(propertyId),
     ]);
     setTenants(t.data || []);
     setParking(p.data || []);
     setRentTerms(rt.data || []);
     setExpenses(ex.data || []);
     setNotes(no.data || []);
-  }, []);
+  }, [propertyId]);
 
   const loadMonth = useCallback(async (m) => {
     const [st, pp] = await Promise.all([paymentsApi.statusForMonth(m), parkingApi.paidForMonth(m)]);
@@ -66,17 +73,41 @@ export default function RentBook({ session, role }) {
     setRawPayments(data || []);
   }, []);
 
+  const loadAudit = useCallback(async () => {
+    if (!propertyId) return;
+    const { data } = await auditApi.recent(propertyId, 200);
+    setAudit(data || []);
+  }, [propertyId]);
+
+  // Pick the active property once on mount (restoring the last choice).
   useEffect(() => {
+    (async () => {
+      const { data } = await propertiesApi.list();
+      const list = data || [];
+      setProperties(list);
+      const stored = typeof localStorage !== "undefined" ? localStorage.getItem("rb_property") : null;
+      const pid = (stored && list.some((p) => p.id === stored)) ? stored : (list[0]?.id || null);
+      setPropertyId(pid);
+      if (!pid) setLoading(false);
+    })();
+  }, []);
+
+  useEffect(() => { if (propertyId && typeof localStorage !== "undefined") localStorage.setItem("rb_property", propertyId); }, [propertyId]);
+
+  // Load the property's data whenever the active property changes.
+  useEffect(() => {
+    if (!propertyId) return;
     (async () => {
       setLoading(true);
       await loadStatic();
       await loadMonth(month);
       setLoading(false);
     })();
-  }, []); // eslint-disable-line
+  }, [propertyId]); // eslint-disable-line
 
   useEffect(() => { loadMonth(month); }, [month, loadMonth]);
   useEffect(() => { if (view === "ledger") loadLedger(); }, [view, loadLedger]);
+  useEffect(() => { if (view === "activity") loadAudit(); }, [view, loadAudit]);
 
   // Live sync: subscribe once to Postgres change webhooks and reload only the
   // slices a given change touches. Refs keep the subscription stable across
@@ -119,9 +150,10 @@ export default function RentBook({ session, role }) {
       bank_confirm: field === "bank_confirm" ? value : (cur.bank_confirm || false),
       notes: field === "notes" ? value : (cur.notes || ""),
     };
-    await paymentsApi.save(row);
+    const { error } = await paymentsApi.save(row);
+    if (error) { flash("error", `Couldn't save — ${error.message}. Try again.`); return; }
     await loadMonth(month);
-  }, [statusMap, month, loadMonth]);
+  }, [statusMap, month, loadMonth, flash]);
 
   const roll = useMemo(() => {
     let expected = 0, collected = 0, govtTotal = 0, tenantTotal = 0, paidCt = 0, partialCt = 0, owedCt = 0;
@@ -154,8 +186,9 @@ export default function RentBook({ session, role }) {
 
   const saveTenant = async (t) => {
     const payload = { ...t };
-    if (!payload.id) delete payload.id;
-    const { data } = await tenantsApi.upsert(payload);
+    if (!payload.id) { delete payload.id; payload.property_id = propertyId; }
+    const { data, error } = await tenantsApi.upsert(payload);
+    if (error) { flash("error", `Couldn't save tenant — ${error.message}`); return; }
     if (!t.id && data) {
       await rentTermsApi.add({
         tenant_id: data.id,
@@ -165,14 +198,28 @@ export default function RentBook({ session, role }) {
       });
     }
     await loadStatic();
+    flash("ok", "Tenant saved");
     setEditTenant(null);
   };
-  const deleteTenant = async (id) => { await tenantsApi.remove(id); await loadStatic(); setEditTenant(null); };
+  const archiveTenant = async (id, active) => {
+    const { error } = await tenantsApi.setActive(id, active);
+    if (error) { flash("error", error.message); return; }
+    await loadStatic();
+    flash("ok", active ? "Tenant reactivated" : "Tenant archived");
+    setEditTenant(null);
+  };
+  const deleteTenant = async (id) => {
+    const { error } = await tenantsApi.remove(id);
+    if (error) { flash("error", `Couldn't delete — ${error.message}`); return; }
+    await loadStatic();
+    flash("ok", "Tenant deleted");
+    setEditTenant(null);
+  };
   const addTerm = async (row) => { await rentTermsApi.add(row); await loadStatic(); };
   const removeTerm = async (id) => { await rentTermsApi.remove(id); await loadStatic(); };
-  const addExpense = async (row) => { await expensesApi.add(row); await loadStatic(); };
+  const addExpense = async (row) => { const { error } = await expensesApi.add({ ...row, property_id: propertyId }); if (error) return flash("error", error.message); await loadStatic(); };
   const removeExpense = async (id) => { await expensesApi.remove(id); await loadStatic(); };
-  const addNote = async (row) => { await notesApi.add({ ...row, author_email: email }); await loadStatic(); };
+  const addNote = async (row) => { const { error } = await notesApi.add({ ...row, author_email: email, property_id: propertyId }); if (error) return flash("error", error.message); await loadStatic(); };
   const removeNote = async (id) => { await notesApi.remove(id); await loadStatic(); };
   const toggleParking = async (spotId) => {
     const next = !parkingPaid[spotId];
@@ -188,7 +235,9 @@ export default function RentBook({ session, role }) {
     { id: "tenants", label: "Tenants", icon: Users },
     { id: "parking", label: "Parking", icon: Car },
     { id: "log", label: "Log", icon: StickyNote },
+    { id: "activity", label: "Activity", icon: Clock },
   ];
+  const activeProperty = properties.find((p) => p.id === propertyId);
   const monthLabel = MONTHS.find((m) => m.key === month)?.label || month;
   const modalTerms = editTenant && editTenant !== "new" ? rentTerms.filter((rt) => rt.tenant_id === editTenant.id) : [];
   const modalNotes = editTenant && editTenant !== "new" ? notes.filter((n) => n.tenant_id === editTenant.id) : [];
@@ -199,13 +248,29 @@ export default function RentBook({ session, role }) {
   // Shared dark-panel contents — rendered in the desktop sidebar and the mobile drawer.
   const railInner = (
     <>
-      <div style={{ padding: "22px 20px 18px", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
+      <div style={{ padding: "22px 20px 16px", borderBottom: "1px solid rgba(255,255,255,.08)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <div style={S.brassPlaque}><Building2 size={18} color="#1a222e" /></div>
           <div>
-            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: "#f4f1ea" }}>2137 Rent Book</div>
-            <div style={{ fontSize: 11, color: "#8b93a1", display: "flex", alignItems: "center", gap: 6 }}>FDOR · {activeTenants.length} units <LiveDot live={live} /></div>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 15, color: "#f4f1ea" }}>Rent Book</div>
+            <div style={{ fontSize: 11, color: "#8b93a1", display: "flex", alignItems: "center", gap: 6 }}>{activeTenants.length} units <LiveDot live={live} /></div>
           </div>
+        </div>
+        <div style={{ marginTop: 12 }}>
+          {properties.length > 1 ? (
+            <select value={propertyId || ""} onChange={(e) => setPropertyId(e.target.value)} style={{
+              width: "100%", padding: "8px 10px", borderRadius: 8, border: "1px solid rgba(255,255,255,.14)",
+              background: "rgba(255,255,255,.05)", color: "#f4f1ea", fontFamily: "'Space Grotesk',sans-serif",
+              fontWeight: 600, fontSize: 13,
+            }}>
+              {properties.map((p) => <option key={p.id} value={p.id} style={{ color: "#1c2836" }}>{p.name}</option>)}
+            </select>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 7, padding: "7px 10px", borderRadius: 8, background: "rgba(255,255,255,.04)", border: "1px solid rgba(255,255,255,.08)" }}>
+              <MapPin size={13} color="#b8892b" />
+              <span style={{ fontSize: 12.5, color: "#d7dce3", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{activeProperty?.name || "—"}</span>
+            </div>
+          )}
         </div>
       </div>
       <nav style={{ padding: "14px 12px", flex: 1, overflowY: "auto" }}>
@@ -243,7 +308,7 @@ export default function RentBook({ session, role }) {
             <div style={S.brassPlaque}><Building2 size={16} color="#1a222e" /></div>
             <div style={{ minWidth: 0 }}>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 14, color: "#f4f1ea", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{NAV.find((n) => n.id === view)?.label}</div>
-              <div style={{ fontSize: 10.5, color: "#8b93a1", display: "flex", alignItems: "center", gap: 5 }}>2137 Rent Book <LiveDot live={live} /></div>
+              <div style={{ fontSize: 10.5, color: "#8b93a1", display: "flex", alignItems: "center", gap: 5 }}>{activeProperty?.name || "Rent Book"} <LiveDot live={live} /></div>
             </div>
           </div>
           <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ ...S.monthSelect, padding: "7px 8px", fontSize: 12.5 }}>
@@ -268,7 +333,7 @@ export default function RentBook({ session, role }) {
           <header style={S.topbar}>
             <div>
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "#1c2836" }}>{NAV.find((n) => n.id === view)?.label}</div>
-              <div style={{ fontSize: 12.5, color: "#8a8681", marginTop: 1 }}>Building 2137 · subsidized rent roll</div>
+              <div style={{ fontSize: 12.5, color: "#8a8681", marginTop: 1 }}>{activeProperty?.name || "Rent roll"} · subsidized rent roll</div>
             </div>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <CalendarClock size={16} color="#8a8681" />
@@ -291,6 +356,7 @@ export default function RentBook({ session, role }) {
               {view === "tenants" && <Tenants tenants={tenants} onEdit={setEditTenant} onAdd={() => setEditTenant("new")} />}
               {view === "parking" && <Parking parking={parking} parkingPaid={parkingPaid} monthLabel={monthLabel} toggle={toggleParking} />}
               {view === "log" && <LogTab notes={buildingNotes} onAdd={(body) => addNote({ tenant_id: null, body })} onRemove={removeNote} />}
+              {view === "activity" && <Activity rows={audit} tenants={tenants} onRefresh={loadAudit} />}
             </>
           )}
         </div>
@@ -301,14 +367,31 @@ export default function RentBook({ session, role }) {
           tenant={editTenant === "new" ? null : editTenant}
           terms={modalTerms}
           tenantNotes={modalNotes}
+          propertyId={propertyId}
           onClose={() => setEditTenant(null)}
           onSave={saveTenant}
           onDelete={deleteTenant}
+          onArchive={archiveTenant}
           onAddTerm={addTerm}
           onRemoveTerm={removeTerm}
           onAddNote={(body, tid) => addNote({ tenant_id: tid, body })}
           onRemoveNote={removeNote}
+          onParkingChanged={loadStatic}
+          flash={flash}
         />
+      )}
+
+      {toast && (
+        <div style={{
+          position: "fixed", left: "50%", bottom: 24, transform: "translateX(-50%)", zIndex: 90,
+          display: "flex", alignItems: "center", gap: 9, padding: "11px 16px", borderRadius: 10,
+          background: toast.kind === "error" ? "#3a2320" : "#173a2a", color: toast.kind === "error" ? "#f3c0b8" : "#a6e0c2",
+          border: `1px solid ${toast.kind === "error" ? "#7a3b32" : "#2c6146"}`, boxShadow: "0 10px 34px rgba(0,0,0,.28)",
+          fontSize: 13.5, fontWeight: 500, maxWidth: "92vw",
+        }}>
+          {toast.kind === "error" ? <AlertTriangle size={16} /> : <Check size={16} />}
+          {toast.text}
+        </div>
       )}
     </div>
   );
@@ -322,6 +405,94 @@ function LiveDot({ live }) {
       <span style={{ width: 6, height: 6, borderRadius: "50%", background: live ? "#12a06e" : "#8b93a1", boxShadow: live ? "0 0 0 3px rgba(18,160,110,.2)" : "none" }} />
       <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: live ? "#5fcf9e" : "#8b93a1" }}>{live ? "Live" : "…"}</span>
     </span>
+  );
+}
+
+/* ================= ACTIVITY (change log by user) ================= */
+const auditFmt = (v) => {
+  if (v === null || v === undefined || v === "") return "—";
+  if (v === true) return "yes"; if (v === false) return "no";
+  if (typeof v === "number" || (/^\d+(\.\d+)?$/.test(v))) return money(v);
+  return String(v);
+};
+function timeAgo(iso) {
+  const d = new Date(iso);
+  return d.toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+}
+function Activity({ rows, tenants, onRefresh }) {
+  const [q, setQ] = useState("");
+  const [type, setType] = useState("all");
+  const tmap = useMemo(() => { const m = {}; tenants.forEach((t) => { m[t.id] = t; }); return m; }, [tenants]);
+
+  const describe = (r) => {
+    const d = r.new_data || r.old_data || {};
+    const verb = r.action === "INSERT" ? "added" : r.action === "DELETE" ? "removed" : "updated";
+    let target = r.table_name, detail = "";
+    if (r.table_name === "payments") {
+      const t = tmap[d.tenant_id];
+      target = `${t ? `${t.unit} · ${t.name}` : "Payment"} — ${d.month || ""}`;
+      if (r.action === "UPDATE" && r.old_data && r.new_data) {
+        detail = ["govt", "portion", "assistance", "check_num", "bank_confirm", "notes"]
+          .filter((f) => String(r.old_data[f] ?? "") !== String(r.new_data[f] ?? ""))
+          .map((f) => `${f}: ${auditFmt(r.old_data[f])} → ${auditFmt(r.new_data[f])}`).join(" · ");
+      }
+    } else if (r.table_name === "tenants") { target = d.name ? `${d.unit || ""} · ${d.name}` : "Tenant"; }
+    else if (r.table_name === "parking_spots") { const t = tmap[d.tenant_id]; target = `Parking ${d.spot || ""}${t ? ` · ${t.name}` : ""}`; }
+    else if (r.table_name === "parking_payments") { target = `Parking payment — ${d.month || ""}`; }
+    else if (r.table_name === "rent_terms") { const t = tmap[d.tenant_id]; target = `Rent term${t ? ` · ${t.name}` : ""}`; }
+    else if (r.table_name === "expenses") { target = `Expense${d.vendor ? ` · ${d.vendor}` : ""}${d.amount ? ` (${money(d.amount)})` : ""}`; }
+    else if (r.table_name === "notes") { target = "Note"; }
+    else if (r.table_name === "properties") { target = `Property ${d.name || ""}`; }
+    return { verb, target, detail };
+  };
+
+  const types = ["all", "payments", "tenants", "parking_spots", "expenses", "rent_terms", "notes"];
+  const filtered = rows.filter((r) => (type === "all" || r.table_name === type) &&
+    (!q || JSON.stringify(r).toLowerCase().includes(q.toLowerCase())));
+  const color = (a) => a === "INSERT" ? "#0f7a54" : a === "DELETE" ? "#a83232" : "#8a6a1e";
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14, flexWrap: "wrap", alignItems: "center" }}>
+        <div style={{ position: "relative", flex: 1, minWidth: 200, maxWidth: 340 }}>
+          <Search size={15} color="#a8a294" style={{ position: "absolute", left: 12, top: 11 }} />
+          <input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search changes, tenants, users"
+            style={{ ...S.cellInput, width: "100%", padding: "9px 12px 9px 34px", fontFamily: "'Inter',sans-serif" }} />
+        </div>
+        <select value={type} onChange={(e) => setType(e.target.value)} style={S.monthSelect}>
+          {types.map((t) => <option key={t} value={t}>{t === "all" ? "All records" : t.replace("_", " ")}</option>)}
+        </select>
+        <button onClick={onRefresh} style={S.ghostBtn}>Refresh</button>
+      </div>
+      <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "13px 18px", borderBottom: "1px solid #eee9df", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={S.cardTitle}>Change log</div>
+          <div style={{ fontSize: 12, color: "#8a8681" }}>{filtered.length} of {rows.length} · newest first</div>
+        </div>
+        {filtered.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", color: "#8a8681", fontSize: 13 }}>No matching activity yet. Every create, edit, and delete is recorded here.</div>
+        ) : filtered.map((r) => {
+          const { verb, target, detail } = describe(r);
+          return (
+            <div key={r.id} style={{ display: "flex", gap: 12, padding: "12px 18px", borderBottom: "1px solid #f2eee5", alignItems: "flex-start" }}>
+              <span style={{ marginTop: 3, width: 8, height: 8, borderRadius: "50%", background: color(r.action), flexShrink: 0 }} />
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 13.5, color: "#1c2836" }}>
+                  <b style={{ fontWeight: 600 }}>{r.actor_email || "System"}</b>
+                  <span style={{ color: "#6b6b66" }}> {verb} </span>
+                  <b style={{ fontWeight: 600 }}>{target}</b>
+                </div>
+                {detail && <div style={{ fontSize: 12, color: "#8a6a1e", fontFamily: "'IBM Plex Mono',monospace", marginTop: 3, wordBreak: "break-word" }}>{detail}</div>}
+              </div>
+              <div style={{ fontSize: 11.5, color: "#a29d92", whiteSpace: "nowrap", flexShrink: 0 }}>{timeAgo(r.at)}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10 }}>
+        This log is append-only — every change is kept, and nothing here can be edited or deleted. It doubles as the version history for each entry.
+      </div>
+    </div>
   );
 }
 
@@ -1010,39 +1181,102 @@ function MiniStat({ icon: Icon, label, v, strong }) {
   );
 }
 
-function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, onAddTerm, onRemoveTerm, onAddNote, onRemoveNote }) {
+const PROGRAMS = ["Section 8", "CityFHEPS", "FHEPS", "Shelter/FHEPS", "HASA", "SCRIE/DRIE", "Other"];
+
+function FormSection({ children }) {
+  return (
+    <div style={{ gridColumn: "1 / -1", display: "flex", alignItems: "center", gap: 10, marginTop: 8 }}>
+      <span style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 11.5, color: "#8a6a1e", textTransform: "uppercase", letterSpacing: ".06em", whiteSpace: "nowrap" }}>{children}</span>
+      <span style={{ flex: 1, height: 1, background: "#eee9df" }} />
+    </div>
+  );
+}
+
+function TenantModal({ tenant, terms, tenantNotes, propertyId, onClose, onSave, onDelete, onArchive, onAddTerm, onRemoveTerm, onAddNote, onRemoveNote, onParkingChanged, flash }) {
   const isMobile = useIsMobile();
   const [f, setF] = useState(tenant || {
-    name: "", unit: "", beds: "2BR", lease_rent: 0, deposit: 0, lease_start: "", lease_end: "",
-    program: "Section 8", govt_default: 0, portion_default: 0, phone: "", active: true,
+    name: "", unit: "", beds: "2BR", lease_rent: 0, deposit: 0, lease_start: "", lease_end: "", move_in_date: "",
+    program: "Section 8", govt_default: 0, portion_default: 0, phone: "", alt_phone: "", email: "",
+    mailing_address: "", emergency_name: "", emergency_phone: "", household_size: "",
+    voucher_number: "", pha_name: "", pha_contact: "", hap_contract_start: "", hap_contract_end: "", recert_due: "",
+    active: true,
   });
+  const [confirmDel, setConfirmDel] = useState(false);
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const num = (k, v) => set(k, v === "" ? 0 : parseFloat(v) || 0);
+  const splitSum = (+f.govt_default || 0) + (+f.portion_default || 0);
+  const splitOff = Math.abs(splitSum - (+f.lease_rent || 0)) > 0.5;
   const clean = () => {
     const out = { ...f };
-    ["lease_start", "lease_end"].forEach((k) => { if (!out[k]) out[k] = null; });
+    ["lease_start", "lease_end", "move_in_date", "hap_contract_start", "hap_contract_end", "recert_due"].forEach((k) => { if (!out[k]) out[k] = null; });
+    out.household_size = out.household_size === "" || out.household_size == null ? null : parseInt(out.household_size, 10) || null;
     return out;
   };
+  const grid = { display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12 };
+
   return (
     <div style={S.overlay} onClick={onClose}>
-      <div style={S.modal} onClick={(e) => e.stopPropagation()}>
+      <div style={{ ...S.modal, width: 640 }} onClick={(e) => e.stopPropagation()}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 18 }}>
-          <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: "#1c2836" }}>{tenant ? "Edit tenant" : "New tenant"}</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 18, color: "#1c2836" }}>{tenant ? "Edit tenant" : "New tenant"}</div>
+            {tenant && (
+              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, padding: "3px 10px", borderRadius: 6, background: f.active ? "#e3f3ec" : "#efece5", color: f.active ? "#0f7a54" : "#8a8681", fontSize: 11.5, fontWeight: 700, letterSpacing: ".04em", textTransform: "uppercase", fontFamily: "'Space Grotesk',sans-serif" }}>
+                <span style={{ width: 6, height: 6, borderRadius: "50%", background: f.active ? "#12a06e" : "#b3ada1" }} />
+                {f.active ? "Active" : "Archived"}
+              </span>
+            )}
+          </div>
           <button onClick={onClose} style={S.iconBtn}><X size={18} /></button>
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr" : "1fr 1fr", gap: 12 }}>
+
+        <div style={grid}>
+          <FormSection>Identity &amp; contact</FormSection>
           <Field label="Tenant name" span={2}><input style={S.field} value={f.name} onChange={(e) => set("name", e.target.value)} /></Field>
-          <Field label="Unit"><input style={S.field} value={f.unit} onChange={(e) => set("unit", e.target.value)} /></Field>
-          <Field label="Bedrooms"><input style={S.field} value={f.beds} onChange={(e) => set("beds", e.target.value)} /></Field>
-          <Field label="Program"><input style={S.field} value={f.program} onChange={(e) => set("program", e.target.value)} /></Field>
           <Field label="Phone"><input style={S.field} value={f.phone || ""} onChange={(e) => set("phone", e.target.value)} /></Field>
-          <Field label="Lease rent"><input style={S.field} inputMode="decimal" value={f.lease_rent} onChange={(e) => num("lease_rent", e.target.value)} /></Field>
+          <Field label="Alt phone"><input style={S.field} value={f.alt_phone || ""} onChange={(e) => set("alt_phone", e.target.value)} /></Field>
+          <Field label="Email" span={2}><input style={S.field} type="email" value={f.email || ""} onChange={(e) => set("email", e.target.value)} /></Field>
+          <Field label="Mailing address" span={2}><input style={S.field} value={f.mailing_address || ""} onChange={(e) => set("mailing_address", e.target.value)} /></Field>
+          <Field label="Emergency contact"><input style={S.field} placeholder="Name" value={f.emergency_name || ""} onChange={(e) => set("emergency_name", e.target.value)} /></Field>
+          <Field label="Emergency phone"><input style={S.field} value={f.emergency_phone || ""} onChange={(e) => set("emergency_phone", e.target.value)} /></Field>
+          <Field label="Household size"><input style={S.field} inputMode="numeric" value={f.household_size ?? ""} onChange={(e) => set("household_size", e.target.value.replace(/[^0-9]/g, ""))} /></Field>
+
+          <FormSection>Unit &amp; lease</FormSection>
+          <Field label="Unit #"><input style={S.field} value={f.unit} onChange={(e) => set("unit", e.target.value)} /></Field>
+          <Field label="Bedrooms"><input style={S.field} value={f.beds} onChange={(e) => set("beds", e.target.value)} /></Field>
+          <Field label="Move-in date"><input style={S.field} type="date" value={f.move_in_date || ""} onChange={(e) => set("move_in_date", e.target.value)} /></Field>
           <Field label="Security deposit"><input style={S.field} inputMode="decimal" value={f.deposit} onChange={(e) => num("deposit", e.target.value)} /></Field>
-          <Field label="Govt share (current)"><input style={S.field} inputMode="decimal" value={f.govt_default} onChange={(e) => num("govt_default", e.target.value)} /></Field>
-          <Field label="Tenant share (current)"><input style={S.field} inputMode="decimal" value={f.portion_default} onChange={(e) => num("portion_default", e.target.value)} /></Field>
           <Field label="Lease start"><input style={S.field} type="date" value={f.lease_start || ""} onChange={(e) => set("lease_start", e.target.value)} /></Field>
           <Field label="Lease end"><input style={S.field} type="date" value={f.lease_end || ""} onChange={(e) => set("lease_end", e.target.value)} /></Field>
+
+          <FormSection>Subsidy &amp; program</FormSection>
+          <Field label="Program">
+            <select style={S.field} value={f.program} onChange={(e) => set("program", e.target.value)}>
+              {(PROGRAMS.includes(f.program) ? PROGRAMS : [f.program, ...PROGRAMS]).map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </Field>
+          <Field label="Voucher / case #"><input style={S.field} value={f.voucher_number || ""} onChange={(e) => set("voucher_number", e.target.value)} /></Field>
+          <Field label="Housing authority (PHA)"><input style={S.field} placeholder="e.g. NYCHA" value={f.pha_name || ""} onChange={(e) => set("pha_name", e.target.value)} /></Field>
+          <Field label="PHA contact"><input style={S.field} value={f.pha_contact || ""} onChange={(e) => set("pha_contact", e.target.value)} /></Field>
+          <Field label="HAP contract start"><input style={S.field} type="date" value={f.hap_contract_start || ""} onChange={(e) => set("hap_contract_start", e.target.value)} /></Field>
+          <Field label="HAP contract end"><input style={S.field} type="date" value={f.hap_contract_end || ""} onChange={(e) => set("hap_contract_end", e.target.value)} /></Field>
+          <Field label="Recertification due"><input style={S.field} type="date" value={f.recert_due || ""} onChange={(e) => set("recert_due", e.target.value)} /></Field>
+
+          <FormSection>Rent split (current default)</FormSection>
+          <Field label="Lease rent"><input style={S.field} inputMode="decimal" value={f.lease_rent} onChange={(e) => num("lease_rent", e.target.value)} /></Field>
+          <div />
+          <Field label="Govt share (HAP)"><input style={S.field} inputMode="decimal" value={f.govt_default} onChange={(e) => num("govt_default", e.target.value)} /></Field>
+          <Field label="Tenant share"><input style={S.field} inputMode="decimal" value={f.portion_default} onChange={(e) => num("portion_default", e.target.value)} /></Field>
+          {splitOff && (
+            <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#9a6511", display: "flex", alignItems: "center", gap: 6 }}>
+              <AlertTriangle size={13} /> Govt + tenant ({money(splitSum)}) doesn't equal lease rent ({money(f.lease_rent)}). Assistance/supplements may cover the gap.
+            </div>
+          )}
         </div>
+
+        {tenant && (
+          <TenantParking tenant={tenant} propertyId={propertyId} onChanged={onParkingChanged} flash={flash} isMobile={isMobile} />
+        )}
 
         <RentSchedule tenant={tenant} terms={terms} onAddTerm={onAddTerm} onRemoveTerm={onRemoveTerm} />
 
@@ -1053,13 +1287,73 @@ function TenantModal({ tenant, terms, tenantNotes, onClose, onSave, onDelete, on
           </div>
         )}
 
-        <div style={{ display: "flex", justifyContent: "space-between", marginTop: 22 }}>
-          {tenant ? <button onClick={() => onDelete(f.id)} style={{ ...S.ghostBtn, color: "#a83232" }}>Remove</button> : <span />}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 22, gap: 10, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            {tenant && (
+              <button onClick={() => onArchive(f.id, !f.active)} style={{ ...S.ghostBtn, display: "inline-flex", alignItems: "center", gap: 6 }}>
+                <Archive size={14} /> {f.active ? "Archive" : "Reactivate"}
+              </button>
+            )}
+            {tenant && (
+              confirmDel ? (
+                <button onClick={() => onDelete(f.id)} style={{ ...S.primaryBtn, background: "#a83232", color: "#fff" }}>Confirm delete</button>
+              ) : (
+                <button onClick={() => setConfirmDel(true)} style={{ ...S.ghostBtn, color: "#a83232" }}>Delete…</button>
+              )
+            )}
+          </div>
           <div style={{ display: "flex", gap: 10 }}>
             <button onClick={onClose} style={S.ghostBtn}>Cancel</button>
             <button onClick={() => onSave(clean())} style={S.primaryBtn}>Save tenant</button>
           </div>
         </div>
+        {confirmDel && <div style={{ fontSize: 12, color: "#a83232", marginTop: 8, textAlign: "right" }}>Deleting removes this tenant and all their payment history permanently. Prefer <b>Archive</b> to keep the record.</div>}
+      </div>
+    </div>
+  );
+}
+
+/* Parking spots owned by a tenant — add/remove, each with its own price + method. */
+function TenantParking({ tenant, propertyId, onChanged, flash, isMobile }) {
+  const [spots, setSpots] = useState([]);
+  const [nw, setNw] = useState({ spot: "", amount: "", method: "Zelle" });
+  const load = useCallback(async () => { const { data } = await parkingApi.forTenant(tenant.id); setSpots(data || []); }, [tenant.id]);
+  useEffect(() => { load(); }, [load]);
+  const add = async () => {
+    if (!nw.spot.trim()) return;
+    const { error } = await parkingApi.createSpot({
+      tenant_id: tenant.id, property_id: propertyId, name: tenant.name,
+      spot: nw.spot.trim(), amount: parseFloat(nw.amount) || 0, method: nw.method,
+    });
+    if (error) { flash?.("error", error.message); return; }
+    setNw({ spot: "", amount: "", method: "Zelle" }); await load(); onChanged?.();
+  };
+  const remove = async (id) => { const { error } = await parkingApi.removeSpot(id); if (error) { flash?.("error", error.message); return; } await load(); onChanged?.(); };
+  return (
+    <div style={{ marginTop: 18, borderTop: "1px solid #eee9df", paddingTop: 16 }}>
+      <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 13.5, color: "#1c2836", marginBottom: 4 }}>Parking spots</div>
+      <div style={{ fontSize: 11.5, color: "#8a8681", marginBottom: 12 }}>A tenant can hold more than one spot, each with its own monthly price.</div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12 }}>
+        {spots.length === 0 && <div style={{ fontSize: 12.5, color: "#8a8681" }}>No spots yet.</div>}
+        {spots.map((s) => (
+          <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 10, background: "#faf8f3", padding: "8px 12px", borderRadius: 8 }}>
+            <div style={{ ...S.brassPlaque, background: "#eef1f4", width: 30, height: 30 }}><Car size={14} color="#5a6472" /></div>
+            <span style={{ fontWeight: 600, fontSize: 13, color: "#1c2836", minWidth: 60 }}>{s.spot}</span>
+            <span style={{ fontSize: 12.5, color: "#5a5850" }}><Money v={s.amount} size={12.5} /> · {s.method}</span>
+            <span style={{ flex: 1 }} />
+            <button onClick={() => remove(s.id)} style={{ ...S.iconBtn, color: "#b3ada1" }}><Trash2 size={14} /></button>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: isMobile ? "1fr 1fr" : "1.2fr 1fr 1fr auto", gap: 8, alignItems: "end" }}>
+        <Field label="Spot / lot"><input style={S.field} placeholder="e.g. Lot 3" value={nw.spot} onChange={(e) => setNw((p) => ({ ...p, spot: e.target.value }))} /></Field>
+        <Field label="Price"><input style={S.field} inputMode="decimal" placeholder="0" value={nw.amount} onChange={(e) => setNw((p) => ({ ...p, amount: e.target.value }))} /></Field>
+        <Field label="Method">
+          <select style={S.field} value={nw.method} onChange={(e) => setNw((p) => ({ ...p, method: e.target.value }))}>
+            {["Zelle", "Cash", "Check", "In rent", "Other"].map((m) => <option key={m} value={m}>{m}</option>)}
+          </select>
+        </Field>
+        <button onClick={add} style={{ ...S.primaryBtn, padding: "9px 14px" }}><Plus size={15} /></button>
       </div>
     </div>
   );

@@ -111,11 +111,4 @@ from parking_spots s join (values
   ('Lot 3', '2026-07')
 ) as d(spot, month) on d.spot = s.spot;
 
--- ---------- SCOPE TO PROPERTY ----------
--- Assign the seeded roster + parking to the first property (the 2137 building).
-update tenants       set property_id = (select id from properties order by created_at limit 1) where property_id is null;
-update parking_spots set property_id = (select id from properties order by created_at limit 1) where property_id is null;
--- Link Boris's Lot 3 to unit 1C (parking that belongs to a tenant).
-update parking_spots s set tenant_id = t.id from tenants t where t.unit = '1C' and s.spot = 'Lot 3' and s.tenant_id is null;
-
 -- Done. Sign up in the app, then add yourself to members (see README step 4).
