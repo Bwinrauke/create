@@ -190,10 +190,12 @@ export default function RentBook({ session, role }) {
     const { data, error } = await tenantsApi.upsert(payload);
     if (error) { flash("error", `Couldn't save tenant — ${error.message}`); return; }
     if (!t.id && data) {
+      // The govt/tenant split is recorded per month in Collections, so the
+      // starting term just carries the lease total (govt assumed to cover it).
       await rentTermsApi.add({
         tenant_id: data.id,
         effective_from: t.lease_start || `${CURRENT_MONTH}-01`,
-        lease_rent: t.lease_rent, govt_expected: t.govt_default, tenant_expected: t.portion_default,
+        lease_rent: t.lease_rent, govt_expected: t.lease_rent, tenant_expected: 0,
         note: "Initial term",
       });
     }
@@ -666,10 +668,10 @@ function Collections({ roll, monthLabel, setPay }) {
           </div>
         ) : (
         <div style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1040 }}>
             <thead>
               <tr>
-                {["Unit", "Tenant", "Lease rent", "Govt", "Tenant portion", "Assistance", "Check #", "Collected", "Variance", "Status"].map((h, i) => (
+                {["Unit", "Tenant", "Lease rent", "Govt (HAP)", "Tenant portion", "Assistance", "Check #", "Collected", "Variance", "Status", "Notes"].map((h, i) => (
                   <th key={h} style={{ ...S.th, textAlign: i >= 2 && i <= 8 ? "right" : "left" }}>{h}</th>
                 ))}
               </tr>
@@ -692,6 +694,9 @@ function Collections({ roll, monthLabel, setPay }) {
                   <td style={{ ...S.td, textAlign: "right" }}><Money v={r.total} bold /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><Variance v={r.variance} /></td>
                   <td style={{ ...S.td, textAlign: "right" }}><Stamp status={r.status} /></td>
+                  <td style={{ ...S.td, minWidth: 190 }}>
+                    <RowNote value={pay.notes} onCommit={(v) => setPay(t.id, "notes", v)} />
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -705,6 +710,7 @@ function Collections({ roll, monthLabel, setPay }) {
                 <td style={{ ...S.td, textAlign: "right" }}><Money v={roll.collected} bold /></td>
                 <td style={{ ...S.td, textAlign: "right" }}><Variance v={-roll.outstanding} /></td>
                 <td style={S.td}></td>
+                <td style={S.td}></td>
               </tr>
             </tfoot>
           </table>
@@ -712,7 +718,7 @@ function Collections({ roll, monthLabel, setPay }) {
         )}
       </div>
       <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
-        <Pencil size={12} /> Edit any govt / portion / assistance figure — the database recomputes the total, variance, and status, and it syncs to everyone on the account.
+        <Pencil size={12} /> Set each month's govt / tenant / assistance split and notes here — the database recomputes the total, variance, and status, and it syncs to everyone on the account.
       </div>
     </div>
   );
@@ -739,12 +745,37 @@ function CollectCard({ t, r, pay, setPay }) {
         <MiniFig label="Variance"><Variance v={r.variance} /></MiniFig>
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-        <Labeled label="Govt"><NumCell value={pay.govt} onCommit={(v) => setPay(t.id, "govt", v)} full /></Labeled>
+        <Labeled label="Govt (HAP)"><NumCell value={pay.govt} onCommit={(v) => setPay(t.id, "govt", v)} full /></Labeled>
         <Labeled label="Tenant portion"><NumCell value={pay.portion} onCommit={(v) => setPay(t.id, "portion", v)} full /></Labeled>
         <Labeled label="Assistance"><NumCell value={pay.assistance} onCommit={(v) => setPay(t.id, "assistance", v)} full /></Labeled>
         <Labeled label="Check #"><TextCell value={pay.check_num} onCommit={(v) => setPay(t.id, "check_num", v)} full /></Labeled>
       </div>
+      <div style={{ marginTop: 10 }}>
+        <Labeled label="Notes"><NoteCell value={pay.notes} onCommit={(v) => setPay(t.id, "notes", v)} /></Labeled>
+      </div>
     </div>
+  );
+}
+
+/* Free-text note for a tenant's month — commits on blur, like the other cells. */
+function NoteCell({ value, onCommit }) {
+  const [v, setV] = useState(value ?? "");
+  useEffect(() => { setV(value ?? ""); }, [value]);
+  return (
+    <textarea value={v} onChange={(e) => setV(e.target.value)} onBlur={() => onCommit(v)} rows={2}
+      placeholder="Comments — e.g. shelter paid $283, portion promised by month-end"
+      style={{ ...S.field, width: "100%", resize: "vertical", fontFamily: "'Inter',sans-serif", lineHeight: 1.4, fontSize: 13.5 }} />
+  );
+}
+/* Single-line note for the desktop reconciliation table. */
+function RowNote({ value, onCommit }) {
+  const [v, setV] = useState(value ?? "");
+  useEffect(() => { setV(value ?? ""); }, [value]);
+  return (
+    <input value={v} onChange={(e) => setV(e.target.value)} onBlur={() => onCommit(v)}
+      onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+      placeholder="Add a comment…"
+      style={{ ...S.cellInput, width: "100%", minWidth: 170, textAlign: "left", fontFamily: "'Inter',sans-serif", fontSize: 12.5 }} />
   );
 }
 
@@ -1146,21 +1177,30 @@ function Tenants({ tenants, onEdit, onAdd }) {
               <div style={{ display: "flex", gap: 11, alignItems: "center", minWidth: 0 }}>
                 <UnitChip unit={t.unit} big />
                 <div style={{ minWidth: 0 }}>
-                  <div style={{ fontWeight: 700, fontSize: 15, color: "#1c2836", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                    <div style={{ fontWeight: 700, fontSize: 15, color: "#1c2836", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</div>
+                    {t.active === false && <span style={{ fontSize: 9.5, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: "#8a8681", background: "#efece5", padding: "2px 6px", borderRadius: 4 }}>Archived</span>}
+                  </div>
                   <div style={{ fontSize: 11.5, color: "#8a8681" }}>{t.beds} · {t.program}</div>
                 </div>
               </div>
               <Pencil size={14} color="#b3ada1" />
             </div>
             <div style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderTop: "1px solid #f2eee5" }}>
-              <MiniStat icon={Landmark} label="Govt" v={t.govt_default} />
-              <MiniStat icon={Wallet} label="Tenant" v={t.portion_default} />
-              <MiniStat icon={Banknote} label="Lease" v={t.lease_rent} strong />
+              <MiniStat icon={Banknote} label="Lease rent" v={t.lease_rent} strong />
+              <MiniStat icon={Wallet} label="Deposit" v={t.deposit || 0} />
+              <div style={{ textAlign: "center", flex: 1 }}>
+                <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em", display: "flex", alignItems: "center", justifyContent: "center", gap: 3, marginBottom: 2 }}>
+                  <Users size={10} /> Household
+                </div>
+                <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 13, color: "#1c2836" }}>{t.household_size || "—"}</span>
+              </div>
             </div>
-            {(t.phone || t.lease_end) && (
-              <div style={{ display: "flex", gap: 14, marginTop: 4, fontSize: 11.5, color: "#8a8681" }}>
+            {(t.phone || t.lease_end || t.recert_due) && (
+              <div style={{ display: "flex", gap: 14, marginTop: 4, fontSize: 11.5, color: "#8a8681", flexWrap: "wrap" }}>
                 {t.phone && <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Phone size={11} /> {t.phone}</span>}
                 {t.lease_end && <span style={{ display: "flex", alignItems: "center", gap: 4 }}><CalendarClock size={11} /> ends {t.lease_end}</span>}
+                {t.recert_due && <span style={{ display: "flex", alignItems: "center", gap: 4 }}><Clock size={11} /> recert {t.recert_due}</span>}
               </div>
             )}
           </div>
@@ -1196,7 +1236,7 @@ function TenantModal({ tenant, terms, tenantNotes, propertyId, onClose, onSave, 
   const isMobile = useIsMobile();
   const [f, setF] = useState(tenant || {
     name: "", unit: "", beds: "2BR", lease_rent: 0, deposit: 0, lease_start: "", lease_end: "", move_in_date: "",
-    program: "Section 8", govt_default: 0, portion_default: 0, phone: "", alt_phone: "", email: "",
+    program: "Section 8", phone: "", alt_phone: "", email: "",
     mailing_address: "", emergency_name: "", emergency_phone: "", household_size: "",
     voucher_number: "", pha_name: "", pha_contact: "", hap_contract_start: "", hap_contract_end: "", recert_due: "",
     active: true,
@@ -1204,8 +1244,6 @@ function TenantModal({ tenant, terms, tenantNotes, propertyId, onClose, onSave, 
   const [confirmDel, setConfirmDel] = useState(false);
   const set = (k, v) => setF((p) => ({ ...p, [k]: v }));
   const num = (k, v) => set(k, v === "" ? 0 : parseFloat(v) || 0);
-  const splitSum = (+f.govt_default || 0) + (+f.portion_default || 0);
-  const splitOff = Math.abs(splitSum - (+f.lease_rent || 0)) > 0.5;
   const clean = () => {
     const out = { ...f };
     ["lease_start", "lease_end", "move_in_date", "hap_contract_start", "hap_contract_end", "recert_due"].forEach((k) => { if (!out[k]) out[k] = null; });
@@ -1262,16 +1300,13 @@ function TenantModal({ tenant, terms, tenantNotes, propertyId, onClose, onSave, 
           <Field label="HAP contract end"><input style={S.field} type="date" value={f.hap_contract_end || ""} onChange={(e) => set("hap_contract_end", e.target.value)} /></Field>
           <Field label="Recertification due"><input style={S.field} type="date" value={f.recert_due || ""} onChange={(e) => set("recert_due", e.target.value)} /></Field>
 
-          <FormSection>Rent split (current default)</FormSection>
-          <Field label="Lease rent"><input style={S.field} inputMode="decimal" value={f.lease_rent} onChange={(e) => num("lease_rent", e.target.value)} /></Field>
+          <FormSection>Rent</FormSection>
+          <Field label="Lease rent (total)"><input style={S.field} inputMode="decimal" value={f.lease_rent} onChange={(e) => num("lease_rent", e.target.value)} /></Field>
           <div />
-          <Field label="Govt share (HAP)"><input style={S.field} inputMode="decimal" value={f.govt_default} onChange={(e) => num("govt_default", e.target.value)} /></Field>
-          <Field label="Tenant share"><input style={S.field} inputMode="decimal" value={f.portion_default} onChange={(e) => num("portion_default", e.target.value)} /></Field>
-          {splitOff && (
-            <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#9a6511", display: "flex", alignItems: "center", gap: 6 }}>
-              <AlertTriangle size={13} /> Govt + tenant ({money(splitSum)}) doesn't equal lease rent ({money(f.lease_rent)}). Assistance/supplements may cover the gap.
-            </div>
-          )}
+          <div style={{ gridColumn: "1 / -1", fontSize: 12, color: "#6b6b66", display: "flex", alignItems: "flex-start", gap: 7, background: "#faf8f3", padding: "10px 12px", borderRadius: 8 }}>
+            <MapPin size={14} color="#b8892b" style={{ marginTop: 1, flexShrink: 0 }} />
+            <span>The <b>govt / tenant split</b> is entered each month on the <b>Collections</b> tab — it can change month to month (recerts, assistance, shelter contributions). Only the total lease rent lives here.</span>
+          </div>
         </div>
 
         {tenant && (
