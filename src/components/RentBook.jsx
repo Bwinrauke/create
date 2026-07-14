@@ -460,16 +460,26 @@ function PLRow({ label, v }) {
 
 /* ================= COLLECTIONS ================= */
 function Collections({ roll, monthLabel, setPay }) {
+  const isMobile = useIsMobile();
   return (
     <div>
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid #eee9df" }}>
+        <div style={{ display: "flex", flexDirection: isMobile ? "column" : "row", justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center", gap: isMobile ? 6 : 0, padding: "14px 18px", borderBottom: "1px solid #eee9df" }}>
           <div style={S.cardTitle}>Reconciliation · {monthLabel}</div>
           <div style={{ display: "flex", gap: 20, fontFamily: "'IBM Plex Mono',monospace", fontSize: 12.5 }}>
             <span style={{ color: "#8a8681" }}>Collected <b style={{ color: "#0f7a54" }}>{money(roll.collected)}</b></span>
             <span style={{ color: "#8a8681" }}>Outstanding <b style={{ color: roll.outstanding > 0.5 ? "#a83232" : "#0f7a54" }}>{money(roll.outstanding)}</b></span>
           </div>
         </div>
+        {isMobile ? (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            {roll.rows.map(({ t, r, pay }) => <CollectCard key={t.id} t={t} r={r} pay={pay} setPay={setPay} />)}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 4px 2px", borderTop: "2px solid #ece7dc", fontWeight: 700, fontSize: 13.5 }}>
+              <span>Totals · {roll.rows.length} units</span>
+              <Money v={roll.collected} bold size={15} />
+            </div>
+          </div>
+        ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 860 }}>
             <thead>
@@ -514,6 +524,7 @@ function Collections({ roll, monthLabel, setPay }) {
             </tfoot>
           </table>
         </div>
+        )}
       </div>
       <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
         <Pencil size={12} /> Edit any govt / portion / assistance figure — the database recomputes the total, variance, and status, and it syncs to everyone on the account.
@@ -522,23 +533,73 @@ function Collections({ roll, monthLabel, setPay }) {
   );
 }
 
-function NumCell({ value, onCommit }) {
+/* Mobile reconciliation card — one tenant, editable, with the figures that were
+   off-screen in the desktop table (collected, variance, status) up top. */
+function CollectCard({ t, r, pay, setPay }) {
+  return (
+    <div style={{ border: "1px solid #f0ece3", borderRadius: 10, padding: 12, background: "#fff" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div style={{ display: "flex", gap: 9, alignItems: "center", minWidth: 0 }}>
+          <UnitChip unit={t.unit} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 14, color: "#1c2836", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</div>
+            <div style={{ fontSize: 11.5, color: "#8a8681" }}>{t.program}</div>
+          </div>
+        </div>
+        <Stamp status={r.status} />
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, margin: "12px 0", padding: "10px 0", borderTop: "1px solid #f4f0e8", borderBottom: "1px solid #f4f0e8" }}>
+        <MiniFig label="Lease"><Money v={r.rent} dim size={13} /></MiniFig>
+        <MiniFig label="Collected"><Money v={r.total} bold size={13} /></MiniFig>
+        <MiniFig label="Variance"><Variance v={r.variance} /></MiniFig>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+        <Labeled label="Govt"><NumCell value={pay.govt} onCommit={(v) => setPay(t.id, "govt", v)} full /></Labeled>
+        <Labeled label="Tenant portion"><NumCell value={pay.portion} onCommit={(v) => setPay(t.id, "portion", v)} full /></Labeled>
+        <Labeled label="Assistance"><NumCell value={pay.assistance} onCommit={(v) => setPay(t.id, "assistance", v)} full /></Labeled>
+        <Labeled label="Check #"><TextCell value={pay.check_num} onCommit={(v) => setPay(t.id, "check_num", v)} full /></Labeled>
+      </div>
+    </div>
+  );
+}
+
+function NumCell({ value, onCommit, full }) {
   const [v, setV] = useState(value ?? "");
   useEffect(() => { setV(value ?? ""); }, [value]);
   return (
     <input value={v} onChange={(e) => setV(e.target.value)}
       onBlur={() => onCommit(v === "" ? 0 : parseFloat(v) || 0)}
       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      inputMode="decimal" placeholder="0.00" style={{ ...S.cellInput, width: 84, textAlign: "right" }} />
+      inputMode="decimal" placeholder="0.00"
+      style={{ ...S.cellInput, width: full ? "100%" : 84, textAlign: full ? "left" : "right", fontSize: full ? 16 : 13 }} />
   );
 }
-function TextCell({ value, onCommit }) {
+function TextCell({ value, onCommit, full }) {
   const [v, setV] = useState(value ?? "");
   useEffect(() => { setV(value ?? ""); }, [value]);
   return (
     <input value={v} onChange={(e) => setV(e.target.value)} onBlur={() => onCommit(v)}
       onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
-      placeholder="—" style={{ ...S.cellInput, width: 92, textAlign: "right", fontSize: 12 }} />
+      placeholder="—"
+      style={{ ...S.cellInput, width: full ? "100%" : 92, textAlign: full ? "left" : "right", fontSize: full ? 16 : 12 }} />
+  );
+}
+
+/* Small labeled field + centered figure used by the mobile card variants. */
+function Labeled({ label, children }) {
+  return (
+    <label style={{ display: "block" }}>
+      <div style={{ fontSize: 10.5, color: "#8a8681", fontWeight: 600, marginBottom: 4, textTransform: "uppercase", letterSpacing: ".03em" }}>{label}</div>
+      {children}
+    </label>
+  );
+}
+function MiniFig({ label, children }) {
+  return (
+    <div style={{ textAlign: "center" }}>
+      <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 3 }}>{label}</div>
+      {children}
+    </div>
   );
 }
 
@@ -554,6 +615,7 @@ function Bal({ v, size = 13 }) {
 }
 
 function Ledger({ tenants, terms, rawPayments }) {
+  const isMobile = useIsMobile();
   const rows = useMemo(() => buildLedger(tenants, terms, rawPayments, CURRENT_MONTH), [tenants, terms, rawPayments]);
   const [open, setOpen] = useState(null);
   const tenantArrears = rows.reduce((s, r) => s + Math.max(r.tenantBal, 0), 0);
@@ -569,10 +631,15 @@ function Ledger({ tenants, terms, rawPayments }) {
       </div>
 
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-        <div style={{ padding: "14px 18px", borderBottom: "1px solid #eee9df", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div style={{ padding: "14px 18px", borderBottom: "1px solid #eee9df", display: "flex", flexDirection: isMobile ? "column" : "row", gap: isMobile ? 4 : 0, justifyContent: "space-between", alignItems: isMobile ? "flex-start" : "center" }}>
           <div style={S.cardTitle}>Balances by tenant</div>
           <div style={{ fontSize: 12, color: "#8a8681" }}>Red = owed to you · (green) = credit / overpaid</div>
         </div>
+        {isMobile ? (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            {rows.map((row) => <LedgerCard key={row.t.id} row={row} isOpen={open === row.t.id} onToggle={() => setOpen(open === row.t.id ? null : row.t.id)} />)}
+          </div>
+        ) : (
         <div style={{ overflowX: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 640 }}>
             <thead>
@@ -617,10 +684,55 @@ function Ledger({ tenants, terms, rawPayments }) {
             </tbody>
           </table>
         </div>
+        )}
       </div>
       <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10 }}>
         Balances carry forward from the first month you logged. Govt and tenant shortfalls are tracked separately, so you know whether to chase the agency or the tenant.
       </div>
+    </div>
+  );
+}
+
+/* Mobile balance card — tap to expand a compact per-month running balance. */
+function LedgerCard({ row, isOpen, onToggle }) {
+  const { t, govtBal, tenantBal, totalBal, detail } = row;
+  return (
+    <div style={{ border: "1px solid #f0ece3", borderRadius: 10, overflow: "hidden", background: "#fff" }}>
+      <div onClick={onToggle} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, padding: 12, cursor: "pointer" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 9, minWidth: 0 }}>
+          <span style={{ color: "#a8a294", flexShrink: 0 }}>{isOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}</span>
+          <UnitChip unit={t.unit} />
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontWeight: 600, fontSize: 13.5, color: "#1c2836", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.name}</div>
+            <div style={{ fontSize: 11, color: "#8a8681" }}>{t.program}</div>
+          </div>
+        </div>
+        <div style={{ textAlign: "right", flexShrink: 0 }}>
+          <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em" }}>Total owed</div>
+          <Bal v={totalBal} size={14} />
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, padding: "0 12px 12px" }}>
+        <MiniFig label="Govt balance"><Bal v={govtBal} /></MiniFig>
+        <MiniFig label="Tenant balance"><Bal v={tenantBal} /></MiniFig>
+      </div>
+      {isOpen && (
+        detail.length === 0 ? (
+          <div style={{ padding: "10px 12px", borderTop: "1px solid #eee9df", background: "#fbfaf6", fontSize: 12.5, color: "#8a8681" }}>No months due yet for this tenant.</div>
+        ) : (
+          <div style={{ borderTop: "1px solid #eee9df", background: "#fbfaf6", padding: "8px 12px" }}>
+            {detail.map((d) => (
+              <div key={d.month} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "5px 0", fontSize: 12 }}>
+                <span style={{ fontWeight: 600, color: "#5a5850" }}>{d.label}</span>
+                <span style={{ display: "flex", gap: 14 }}>
+                  <span style={{ color: "#8a8681" }}>Govt <Bal v={d.govtBal} size={12} /></span>
+                  <span style={{ color: "#8a8681" }}>Tenant <Bal v={d.tenantBal} size={12} /></span>
+                </span>
+              </div>
+            ))}
+          </div>
+        )
+      )}
     </div>
   );
 }
@@ -704,6 +816,10 @@ function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, 
         <div style={{ padding: "13px 18px", borderBottom: "1px solid #eee9df" }}><div style={S.cardTitle}>Entries</div></div>
         {shown.length === 0 ? (
           <div style={{ padding: 22, textAlign: "center", color: "#8a8681", fontSize: 13 }}>No expenses logged {scope === "month" ? `for ${monthLabel}` : "yet"}. Add one above.</div>
+        ) : isMobile ? (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            {shown.map((e) => <ExpenseCard key={e.id} e={e} onRemove={onRemove} />)}
+          </div>
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
@@ -732,6 +848,27 @@ function Expenses({ expenses, monthExpenses, monthLabel, month, tenants, onAdd, 
             </table>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/* Mobile expense card — the amount and delete action stay visible without scroll. */
+function ExpenseCard({ e, onRemove }) {
+  return (
+    <div style={{ border: "1px solid #f0ece3", borderRadius: 10, padding: 12, background: "#fff", display: "flex", justifyContent: "space-between", gap: 10 }}>
+      <div style={{ minWidth: 0 }}>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+          <span style={{ fontSize: 12, background: "#f3f0e9", padding: "2px 8px", borderRadius: 5, color: "#5a5850" }}>{e.category}</span>
+          {e.unit ? <UnitChip unit={e.unit} /> : <span style={{ fontSize: 11.5, color: "#8a8681" }}>Building</span>}
+        </div>
+        <div style={{ fontWeight: 600, fontSize: 14, color: "#1c2836", marginTop: 6 }}>{e.vendor || "—"}</div>
+        {e.note && <div style={{ fontSize: 12.5, color: "#6b6b66", marginTop: 2 }}>{e.note}</div>}
+        <div style={{ fontSize: 11.5, color: "#8a8681", fontFamily: "'IBM Plex Mono',monospace", marginTop: 4 }}>{e.spent_on}</div>
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "space-between", flexShrink: 0 }}>
+        <Money v={e.amount} bold />
+        <button onClick={() => onRemove(e.id)} style={{ ...S.iconBtn, color: "#b3ada1" }}><Trash2 size={14} /></button>
       </div>
     </div>
   );
