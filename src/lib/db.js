@@ -8,7 +8,13 @@ export const authApi = {
   getSession: () => supabase.auth.getSession(),
   onChange: (cb) => supabase.auth.onAuthStateChange((_e, s) => cb(s)),
   async isMember() {
-    const { data, error } = await supabase.from("members").select("user_id, role").maybeSingle();
+    // Look up only the signed-in user's own membership row, so the check stays
+    // correct no matter how many members exist (never relies on RLS to return
+    // exactly one row).
+    const { data: userData } = await supabase.auth.getUser();
+    const uid = userData?.user?.id;
+    if (!uid) return { member: false, role: null };
+    const { data, error } = await supabase.from("members").select("role").eq("user_id", uid).maybeSingle();
     if (error) return { member: false, role: null };
     return { member: !!data, role: data?.role || null };
   },

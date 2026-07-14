@@ -184,13 +184,18 @@ alter table rent_terms       enable row level security;
 alter table expenses         enable row level security;
 alter table notes            enable row level security;
 
--- members: a signed-in user may see their own membership row;
--- only an owner may add/remove members.
+-- members: a signed-in user may see ONLY their own membership row (so the
+-- app's single-row membership check works with any number of members);
+-- only an owner may add / change / remove members.
 create policy members_self_read on members
-  for select using (user_id = auth.uid() or is_member());
-create policy members_owner_write on members
-  for all using (exists (select 1 from members m where m.user_id = auth.uid() and m.role = 'owner'))
-  with check (exists (select 1 from members m where m.user_id = auth.uid() and m.role = 'owner'));
+  for select using (user_id = auth.uid());
+create policy members_owner_insert on members
+  for insert with check (exists (select 1 from members m where m.user_id = auth.uid() and m.role = 'owner'));
+create policy members_owner_update on members
+  for update using (exists (select 1 from members m where m.user_id = auth.uid() and m.role = 'owner'))
+             with check (exists (select 1 from members m where m.user_id = auth.uid() and m.role = 'owner'));
+create policy members_owner_delete on members
+  for delete using (exists (select 1 from members m where m.user_id = auth.uid() and m.role = 'owner'));
 
 -- all data tables: full read/write for any member.
 create policy tenants_rw on tenants
