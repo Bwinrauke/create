@@ -177,6 +177,31 @@ create trigger trg_touch_payment before insert or update on payments
   for each row execute function touch_payment();
 
 -- ============================================================
+--  AUTO-MARK "IN RENT" PARKING
+--  When a tenant's rent is fully paid for a month, their parking spots whose
+--  method is 'In rent' are auto-marked paid for that month (and un-marked if
+--  the rent later drops below full) — no manual entry needed.
+-- ============================================================
+create or replace function sync_in_rent_parking() returns trigger
+language plpgsql security definer set search_path = public as $$
+declare
+  v_rent numeric;
+  v_paid boolean;
+begin
+  select lease_rent into v_rent from tenants where id = new.tenant_id;
+  v_paid := (new.total > 0.001) and (new.total - coalesce(v_rent, 0) >= -0.5);
+  insert into parking_payments (spot_id, month, paid, amount)
+  select s.id, new.month, v_paid, case when v_paid then s.amount else 0 end
+  from parking_spots s
+  where s.tenant_id = new.tenant_id and s.method = 'In rent'
+  on conflict (spot_id, month) do update set paid = excluded.paid, amount = excluded.amount;
+  return new;
+end $$;
+drop trigger if exists trg_sync_in_rent on payments;
+create trigger trg_sync_in_rent after insert or update on payments
+  for each row execute function sync_in_rent_parking();
+
+-- ============================================================
 --  ROW-LEVEL SECURITY
 --  Nobody touches anything unless they are in the members table.
 -- ============================================================
