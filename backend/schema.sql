@@ -92,6 +92,52 @@ create table if not exists parking_payments (
 );
 
 -- ============================================================
+--  RENT TERMS  (effective-dated govt/tenant split per tenant)
+--  Each dated term sets the expected split from that date forward;
+--  the arrears ledger uses the earliest term as the tenant's start,
+--  so a tenant contributes no history before their lease begins.
+-- ============================================================
+create table if not exists rent_terms (
+  id              uuid primary key default gen_random_uuid(),
+  tenant_id       uuid not null references tenants(id) on delete cascade,
+  effective_from  date not null,
+  lease_rent      numeric(10,2) not null default 0,
+  govt_expected   numeric(10,2) not null default 0,
+  tenant_expected numeric(10,2) not null default 0,
+  note            text,
+  created_at      timestamptz not null default now()
+);
+create index if not exists rent_terms_tenant_idx on rent_terms(tenant_id, effective_from);
+
+-- ============================================================
+--  EXPENSES  (building- or unit-level spend)
+-- ============================================================
+create table if not exists expenses (
+  id         uuid primary key default gen_random_uuid(),
+  spent_on   date not null,
+  amount     numeric(10,2) not null default 0,
+  category   text,
+  vendor     text,
+  unit       text,
+  note       text,
+  created_at timestamptz not null default now()
+);
+create index if not exists expenses_spent_on_idx on expenses(spent_on);
+
+-- ============================================================
+--  NOTES / LOG  (shared building + per-tenant notes)
+--  tenant_id null = building-wide log entry.
+-- ============================================================
+create table if not exists notes (
+  id           uuid primary key default gen_random_uuid(),
+  tenant_id    uuid references tenants(id) on delete cascade,
+  body         text not null,
+  author_email text,
+  created_at   timestamptz not null default now()
+);
+create index if not exists notes_tenant_idx on notes(tenant_id);
+
+-- ============================================================
 --  VIEW: payment_status
 --  Joins payments to their tenant and computes the same logic
 --  your spreadsheet did: variance and paid/partial/owed status.
@@ -134,6 +180,9 @@ alter table tenants          enable row level security;
 alter table parking_spots    enable row level security;
 alter table payments         enable row level security;
 alter table parking_payments enable row level security;
+alter table rent_terms       enable row level security;
+alter table expenses         enable row level security;
+alter table notes            enable row level security;
 
 -- members: a signed-in user may see their own membership row;
 -- only an owner may add/remove members.
@@ -151,6 +200,12 @@ create policy parking_rw on parking_spots
 create policy payments_rw on payments
   for all using (is_member()) with check (is_member());
 create policy parking_pay_rw on parking_payments
+  for all using (is_member()) with check (is_member());
+create policy rent_terms_rw on rent_terms
+  for all using (is_member()) with check (is_member());
+create policy expenses_rw on expenses
+  for all using (is_member()) with check (is_member());
+create policy notes_rw on notes
   for all using (is_member()) with check (is_member());
 
 -- ============================================================

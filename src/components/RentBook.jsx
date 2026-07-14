@@ -13,6 +13,17 @@ import {
   Money, Variance, Stamp, UnitChip, Legend, BigStat, useIsMobile,
 } from "../lib/ui";
 
+// True once `month` (a "YYYY-MM" key) has reached one calendar month before
+// `leaseStart`. Tenants with no lease start on file are always shown.
+function monthReached(leaseStart, month) {
+  if (!leaseStart) return true;
+  const [ly, lm] = leaseStart.slice(0, 7).split("-").map(Number);
+  const gy = lm === 1 ? ly - 1 : ly;
+  const gm = lm === 1 ? 12 : lm - 1;
+  const gate = `${gy}-${String(gm).padStart(2, "0")}`;
+  return month >= gate; // zero-padded YYYY-MM compares lexically
+}
+
 export default function RentBook({ session, role }) {
   const [view, setView] = useState("overview");
   const [month, setMonth] = useState(CURRENT_MONTH);
@@ -114,7 +125,10 @@ export default function RentBook({ session, role }) {
 
   const roll = useMemo(() => {
     let expected = 0, collected = 0, govtTotal = 0, tenantTotal = 0, paidCt = 0, partialCt = 0, owedCt = 0;
-    const rows = activeTenants.map((t) => {
+    // A tenant only enters the roll once the viewing month reaches one month
+    // before their lease start — or as soon as they have a payment that month.
+    const visible = activeTenants.filter((t) => monthReached(t.lease_start, month) || statusMap[t.id]);
+    const rows = visible.map((t) => {
       const s = statusMap[t.id];
       const r = s
         ? { govt: +s.govt, portion: +s.portion, assistance: +s.assistance, total: +s.total, rent: +s.lease_rent, variance: +s.variance, status: s.status }
@@ -127,7 +141,7 @@ export default function RentBook({ session, role }) {
       return { t, r, pay };
     });
     return { rows, expected, collected, govtTotal, tenantTotal, outstanding: expected - collected, paidCt, partialCt, owedCt };
-  }, [activeTenants, statusMap]);
+  }, [activeTenants, statusMap, month]);
 
   const leaseAlerts = useMemo(() => {
     const ref = new Date(month + "-01");
