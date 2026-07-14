@@ -2,16 +2,17 @@ import React, { useState, useEffect, useMemo, useCallback, useRef } from "react"
 import {
   Building2, LayoutDashboard, Receipt, Users, Grid3x3, Car,
   Check, Phone, Plus, X, Search, CalendarClock, Banknote, Pencil,
-  ChevronRight, ChevronDown, Landmark, Wallet, LogOut, Trash2,
-  StickyNote, TrendingUp, Menu, Clock, AlertTriangle, Archive, MapPin,
+  ChevronRight, ChevronDown, ChevronLeft, Landmark, Wallet, LogOut, Trash2,
+  StickyNote, TrendingUp, Menu, Clock, AlertTriangle, Archive, MapPin, BarChart3,
 } from "lucide-react";
 import {
   tenantsApi, parkingApi, paymentsApi, rentTermsApi, expensesApi, notesApi, authApi, realtime,
   propertiesApi, auditApi,
 } from "../lib/db";
 import {
-  S, MONTHS, STATUS, CURRENT_MONTH, EXPENSE_CATEGORIES, money, reconcile, buildLedger,
+  S, STATUS, CURRENT_MONTH, EXPENSE_CATEGORIES, money, reconcile, buildLedger,
   Money, Variance, Stamp, UnitChip, Legend, BigStat, useIsMobile,
+  addMonths, monthRange, monthLabelFor, thisMonthKey, periodKeyFor, periodLabelFor,
 } from "../lib/ui";
 
 // True once `month` (a "YYYY-MM" key) has reached one calendar month before
@@ -37,6 +38,8 @@ export default function RentBook({ session, role }) {
   const [expenses, setExpenses] = useState([]);
   const [notes, setNotes] = useState([]);
   const [audit, setAudit] = useState([]);
+  const [allStatus, setAllStatus] = useState([]);
+  const [allParkPaid, setAllParkPaid] = useState([]);
   const [editTenant, setEditTenant] = useState(null);
   const [loading, setLoading] = useState(true);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -79,6 +82,12 @@ export default function RentBook({ session, role }) {
     setAudit(data || []);
   }, [propertyId]);
 
+  const loadSummary = useCallback(async () => {
+    const [st, pp] = await Promise.all([paymentsApi.allStatus(), parkingApi.allPaid()]);
+    setAllStatus(st.data || []);
+    setAllParkPaid(pp.data || []);
+  }, []);
+
   // Pick the active property once on mount (restoring the last choice).
   useEffect(() => {
     (async () => {
@@ -108,6 +117,7 @@ export default function RentBook({ session, role }) {
   useEffect(() => { loadMonth(month); }, [month, loadMonth]);
   useEffect(() => { if (view === "ledger") loadLedger(); }, [view, loadLedger]);
   useEffect(() => { if (view === "activity") loadAudit(); }, [view, loadAudit]);
+  useEffect(() => { if (view === "summary") loadSummary(); }, [view, loadSummary]);
 
   // Live sync: subscribe once to Postgres change webhooks and reload only the
   // slices a given change touches. Refs keep the subscription stable across
@@ -236,11 +246,22 @@ export default function RentBook({ session, role }) {
     { id: "expenses", label: "Expenses", icon: Wallet },
     { id: "tenants", label: "Tenants", icon: Users },
     { id: "parking", label: "Parking", icon: Car },
+    { id: "summary", label: "Summary", icon: BarChart3 },
     { id: "log", label: "Log", icon: StickyNote },
     { id: "activity", label: "Activity", icon: Clock },
   ];
   const activeProperty = properties.find((p) => p.id === propertyId);
-  const monthLabel = MONTHS.find((m) => m.key === month)?.label || month;
+  const monthLabel = monthLabelFor(month);
+  // Month list spans a generous window and always stretches to include the
+  // selected month, so the prev/next arrows can reach any month on demand.
+  const monthOptions = useMemo(() => {
+    const start = month < "2025-07" ? month : "2025-07";
+    let end = addMonths(thisMonthKey(), 18);
+    if (month > end) end = month;
+    if (CURRENT_MONTH > end) end = CURRENT_MONTH;
+    return monthRange(start, end);
+  }, [month]);
+  const shiftMonth = useCallback((n) => setMonth((mm) => addMonths(mm, n)), []);
   const modalTerms = editTenant && editTenant !== "new" ? rentTerms.filter((rt) => rt.tenant_id === editTenant.id) : [];
   const modalNotes = editTenant && editTenant !== "new" ? notes.filter((n) => n.tenant_id === editTenant.id) : [];
   const buildingNotes = useMemo(() => notes.filter((n) => !n.tenant_id), [notes]);
@@ -313,9 +334,7 @@ export default function RentBook({ session, role }) {
               <div style={{ fontSize: 10.5, color: "#8b93a1", display: "flex", alignItems: "center", gap: 5 }}>{activeProperty?.name || "Rent Book"} <LiveDot live={live} /></div>
             </div>
           </div>
-          <select value={month} onChange={(e) => setMonth(e.target.value)} style={{ ...S.monthSelect, padding: "7px 8px", fontSize: 12.5 }}>
-            {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-          </select>
+          <MonthPicker month={month} options={monthOptions} onChange={setMonth} onShift={shiftMonth} compact />
         </header>
       )}
 
@@ -337,12 +356,7 @@ export default function RentBook({ session, role }) {
               <div style={{ fontFamily: "'Space Grotesk',sans-serif", fontWeight: 700, fontSize: 20, color: "#1c2836" }}>{NAV.find((n) => n.id === view)?.label}</div>
               <div style={{ fontSize: 12.5, color: "#8a8681", marginTop: 1 }}>{activeProperty?.name || "Rent roll"} · subsidized rent roll</div>
             </div>
-            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              <CalendarClock size={16} color="#8a8681" />
-              <select value={month} onChange={(e) => setMonth(e.target.value)} style={S.monthSelect}>
-                {MONTHS.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
-              </select>
-            </div>
+            <MonthPicker month={month} options={monthOptions} onChange={setMonth} onShift={shiftMonth} />
           </header>
         )}
 
@@ -358,6 +372,7 @@ export default function RentBook({ session, role }) {
               {view === "tenants" && <Tenants tenants={tenants} onEdit={setEditTenant} onAdd={() => setEditTenant("new")} />}
               {view === "parking" && <Parking parking={parking} parkingPaid={parkingPaid} monthLabel={monthLabel} toggle={toggleParking} />}
               {view === "log" && <LogTab notes={buildingNotes} onAdd={(body) => addNote({ tenant_id: null, body })} onRemove={removeNote} />}
+              {view === "summary" && <Summary tenants={activeTenants} allStatus={allStatus} allParkPaid={allParkPaid} parking={parking} expenses={expenses} onJump={(m) => { setMonth(m); setView("collections"); }} />}
               {view === "activity" && <Activity rows={audit} tenants={tenants} onRefresh={loadAudit} />}
             </>
           )}
@@ -407,6 +422,162 @@ function LiveDot({ live }) {
       <span style={{ width: 6, height: 6, borderRadius: "50%", background: live ? "#12a06e" : "#8b93a1", boxShadow: live ? "0 0 0 3px rgba(18,160,110,.2)" : "none" }} />
       <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: ".05em", textTransform: "uppercase", color: live ? "#5fcf9e" : "#8b93a1" }}>{live ? "Live" : "…"}</span>
     </span>
+  );
+}
+
+/* Month navigator — dropdown plus prev/next arrows that reach any month. */
+function MonthPicker({ month, options, onChange, onShift, compact }) {
+  const arrow = {
+    display: "inline-flex", alignItems: "center", justifyContent: "center",
+    width: compact ? 32 : 36, height: compact ? 34 : 38, borderRadius: 8,
+    border: "1px solid #e2ddd0", background: "#faf8f3", color: "#5a5850", flexShrink: 0,
+  };
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+      <button onClick={() => onShift(-1)} style={arrow} aria-label="Previous month"><ChevronLeft size={16} /></button>
+      <select value={month} onChange={(e) => onChange(e.target.value)} style={{ ...S.monthSelect, ...(compact ? { padding: "7px 8px", fontSize: 12.5 } : {}) }}>
+        {options.map((m) => <option key={m.key} value={m.key}>{m.label}</option>)}
+      </select>
+      <button onClick={() => onShift(1)} style={arrow} aria-label="Next month"><ChevronRight size={16} /></button>
+    </div>
+  );
+}
+
+/* ================= SUMMARY (by month / quarter / year) ================= */
+function Summary({ tenants, allStatus, allParkPaid, parking, expenses, onJump }) {
+  const isMobile = useIsMobile();
+  const [grouping, setGrouping] = useState("month");
+
+  // Scope the all-time data to this property's tenants / spots.
+  const tenantIds = useMemo(() => new Set(tenants.map((t) => t.id)), [tenants]);
+  const spotAmt = useMemo(() => { const m = {}; parking.forEach((p) => { m[p.id] = +p.amount || 0; }); return m; }, [parking]);
+  const scopedStatus = useMemo(() => allStatus.filter((s) => tenantIds.has(s.tenant_id)), [allStatus, tenantIds]);
+
+  const rows = useMemo(() => {
+    const acc = {}; // periodKey -> aggregates
+    const bump = (mk) => {
+      const pk = periodKeyFor(mk, grouping);
+      return (acc[pk] = acc[pk] || { period: pk, expected: 0, collected: 0, parking: 0, expenses: 0, paid: 0, partial: 0, owed: 0, units: 0 });
+    };
+    // rent collected + status counts, per month
+    scopedStatus.forEach((s) => {
+      const a = bump(s.month);
+      a.collected += +s.total || 0; a.units += 1;
+      if (s.status === "paid") a.paid += 1; else if (s.status === "partial") a.partial += 1; else a.owed += 1;
+    });
+    // expected rent per month = lease rent for tenants inside their collection window
+    const monthsSeen = new Set(scopedStatus.map((s) => s.month));
+    monthsSeen.forEach((mk) => {
+      const a = bump(mk);
+      tenants.forEach((t) => { if (monthReached(t.lease_start, mk)) a.expected += +t.lease_rent || 0; });
+    });
+    // parking collected per month
+    allParkPaid.forEach((pp) => { if (pp.paid && spotAmt[pp.spot_id] != null) bump(pp.month).parking += spotAmt[pp.spot_id]; });
+    // expenses per month
+    expenses.forEach((e) => { const mk = (e.spent_on || "").slice(0, 7); if (mk) bump(mk).expenses += +e.amount || 0; });
+
+    return Object.values(acc)
+      .map((a) => ({ ...a, income: a.collected + a.parking, net: a.collected + a.parking - a.expenses, outstanding: Math.max(a.expected - a.collected, 0) }))
+      .sort((x, y) => (x.period < y.period ? 1 : -1));
+  }, [scopedStatus, tenants, allParkPaid, spotAmt, expenses, grouping]);
+
+  const tot = rows.reduce((s, r) => ({
+    expected: s.expected + r.expected, collected: s.collected + r.collected, parking: s.parking + r.parking,
+    expenses: s.expenses + r.expenses, income: s.income + r.income, net: s.net + r.net, outstanding: s.outstanding + r.outstanding,
+  }), { expected: 0, collected: 0, parking: 0, expenses: 0, income: 0, net: 0, outstanding: 0 });
+
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 18 }}>
+        <BigStat label="Rent collected · all time" value={money(tot.collected)} sub={`${rows.length} ${grouping === "month" ? "months" : grouping === "quarter" ? "quarters" : "years"}`} accent="#0f7a54" />
+        <BigStat label="Parking collected" value={money(tot.parking)} sub="all time" accent="#3a6ea5" />
+        <BigStat label="Expenses" value={money(tot.expenses)} sub="all time" accent="#a83232" />
+        <BigStat label="Net operating" value={money(tot.net)} sub="income − expenses" accent={tot.net >= 0 ? "#0f7a54" : "#a83232"} />
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+        {[["month", "By month"], ["quarter", "By quarter"], ["year", "By year"]].map(([k, lbl]) => (
+          <button key={k} onClick={() => setGrouping(k)} style={{
+            ...S.pill, cursor: "pointer",
+            background: grouping === k ? "#161f2b" : "#f3f0e9", color: grouping === k ? "#f4d488" : "#8a8681",
+            border: grouping === k ? "none" : "1px solid #ddd7cb",
+          }}>{lbl}</button>
+        ))}
+      </div>
+
+      <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
+        <div style={{ padding: "13px 18px", borderBottom: "1px solid #eee9df", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <div style={S.cardTitle}>Collections summary</div>
+          <div style={{ fontSize: 12, color: "#8a8681" }}>{rows.length} periods</div>
+        </div>
+        {rows.length === 0 ? (
+          <div style={{ padding: 24, textAlign: "center", color: "#8a8681", fontSize: 13 }}>No collection data yet.</div>
+        ) : isMobile ? (
+          <div style={{ padding: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+            {rows.map((r) => (
+              <div key={r.period} onClick={grouping === "month" ? () => onJump(r.period) : undefined}
+                style={{ border: "1px solid #f0ece3", borderRadius: 10, padding: 12, cursor: grouping === "month" ? "pointer" : "default" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontWeight: 700, fontSize: 14, color: "#1c2836" }}>{periodLabelFor(r.period, grouping)}</span>
+                  <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 700, fontSize: 15, color: r.net >= 0 ? "#0f7a54" : "#a83232" }}>{money(r.net)}</span>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, fontSize: 12.5 }}>
+                  <SumLine label="Rent + parking" v={r.income} />
+                  <SumLine label="Expenses" v={-r.expenses} />
+                  <SumLine label="Expected" v={r.expected} dim />
+                  <SumLine label="Outstanding" v={r.outstanding} warn={r.outstanding > 0.5} />
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 720 }}>
+              <thead>
+                <tr>{["Period", "Expected", "Rent collected", "Parking", "Outstanding", "Expenses", "Net operating"].map((h, i) => (
+                  <th key={h} style={{ ...S.th, textAlign: i === 0 ? "left" : "right" }}>{h}</th>))}</tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.period} onClick={grouping === "month" ? () => onJump(r.period) : undefined}
+                    style={{ borderBottom: "1px solid #f2eee5", cursor: grouping === "month" ? "pointer" : "default" }}>
+                    <td style={{ ...S.td, fontWeight: 600 }}>{periodLabelFor(r.period, grouping)}</td>
+                    <td style={{ ...S.td, textAlign: "right" }}><Money v={r.expected} dim /></td>
+                    <td style={{ ...S.td, textAlign: "right" }}><Money v={r.collected} bold /></td>
+                    <td style={{ ...S.td, textAlign: "right" }}><Money v={r.parking} /></td>
+                    <td style={{ ...S.td, textAlign: "right" }}><Money v={r.outstanding} /></td>
+                    <td style={{ ...S.td, textAlign: "right" }}><Money v={r.expenses} /></td>
+                    <td style={{ ...S.td, textAlign: "right" }}><span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: r.net >= 0 ? "#0f7a54" : "#a83232" }}>{money(r.net)}</span></td>
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot>
+                <tr style={{ background: "#faf8f3" }}>
+                  <td style={{ ...S.td, fontWeight: 700 }}>Total</td>
+                  <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.expected} bold /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.collected} bold /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.parking} bold /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.outstanding} bold /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><Money v={tot.expenses} bold /></td>
+                  <td style={{ ...S.td, textAlign: "right" }}><span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 700, color: tot.net >= 0 ? "#0f7a54" : "#a83232" }}>{money(tot.net)}</span></td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10 }}>
+        Net operating = rent + parking collected − expenses. {grouping === "month" && "Tap a month to open it in Collections."}
+      </div>
+    </div>
+  );
+}
+function SumLine({ label, v, dim, warn }) {
+  return (
+    <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+      <span style={{ color: "#8a8681" }}>{label}</span>
+      <span style={{ fontFamily: "'IBM Plex Mono',monospace", fontWeight: 600, color: warn ? "#a83232" : dim ? "#9a958c" : "#1c2836" }}>{money(v)}</span>
+    </div>
   );
 }
 
