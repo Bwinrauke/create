@@ -67,7 +67,7 @@ export default function RentBook({ session, role }) {
     const [st, pp] = await Promise.all([paymentsApi.statusForMonth(m), parkingApi.paidForMonth(m)]);
     setMonthStatus(st.data || []);
     const map = {};
-    (pp.data || []).forEach((r) => { map[r.spot_id] = r.paid; });
+    (pp.data || []).forEach((r) => { map[r.spot_id] = +r.amount || 0; }); // spot_id -> received $
     setParkingPaid(map);
   }, []);
 
@@ -233,11 +233,13 @@ export default function RentBook({ session, role }) {
   const removeExpense = async (id) => { await expensesApi.remove(id); await loadStatic(); };
   const addNote = async (row) => { const { error } = await notesApi.add({ ...row, author_email: email, property_id: propertyId }); if (error) return flash("error", error.message); await loadStatic(); };
   const removeNote = async (id) => { await notesApi.remove(id); await loadStatic(); };
-  const toggleParking = async (spotId) => {
-    const next = !parkingPaid[spotId];
-    setParkingPaid((p) => ({ ...p, [spotId]: next }));
-    await parkingApi.setPaid(spotId, month, next);
-  };
+  // Record the amount actually received for a parking spot this month (reconciled).
+  const setParkingReceived = useCallback(async (spotId, amount) => {
+    const amt = +amount || 0;
+    setParkingPaid((p) => ({ ...p, [spotId]: amt }));
+    const { error } = await parkingApi.setReceived(spotId, month, amt);
+    if (error) { flash("error", `Couldn't save parking — ${error.message}`); loadMonth(month); }
+  }, [month, flash, loadMonth]);
 
   const NAV = [
     { id: "overview", label: "Overview", icon: LayoutDashboard },
@@ -366,11 +368,11 @@ export default function RentBook({ session, role }) {
           ) : (
             <>
               {view === "overview" && <Overview roll={roll} monthLabel={monthLabel} leaseAlerts={leaseAlerts} go={setView} parking={parking} parkingPaid={parkingPaid} monthExpenses={monthExpenses} />}
-              {view === "collections" && <Collections roll={roll} monthLabel={monthLabel} setPay={setPay} />}
+              {view === "collections" && <Collections roll={roll} monthLabel={monthLabel} setPay={setPay} parking={parking} parkingRec={parkingPaid} setParkingReceived={setParkingReceived} />}
               {view === "ledger" && <Ledger tenants={activeTenants} terms={rentTerms} rawPayments={rawPayments} />}
               {view === "expenses" && <Expenses expenses={expenses} monthExpenses={monthExpenses} monthLabel={monthLabel} month={month} tenants={activeTenants} onAdd={addExpense} onRemove={removeExpense} />}
               {view === "tenants" && <Tenants tenants={tenants} onEdit={setEditTenant} onAdd={() => setEditTenant("new")} />}
-              {view === "parking" && <Parking parking={parking} parkingPaid={parkingPaid} monthLabel={monthLabel} toggle={toggleParking} />}
+              {view === "parking" && <Parking parking={parking} parkingRec={parkingPaid} monthLabel={monthLabel} setReceived={setParkingReceived} />}
               {view === "log" && <LogTab notes={buildingNotes} onAdd={(body) => addNote({ tenant_id: null, body })} onRemove={removeNote} />}
               {view === "summary" && <Summary tenants={activeTenants} allStatus={allStatus} allParkPaid={allParkPaid} parking={parking} expenses={expenses} onJump={(m) => { setMonth(m); setView("collections"); }} />}
               {view === "activity" && <Activity rows={audit} tenants={tenants} onRefresh={loadAudit} />}
@@ -450,7 +452,7 @@ function Summary({ tenants, allStatus, allParkPaid, parking, expenses, onJump })
 
   // Scope the all-time data to this property's tenants / spots.
   const tenantIds = useMemo(() => new Set(tenants.map((t) => t.id)), [tenants]);
-  const spotAmt = useMemo(() => { const m = {}; parking.forEach((p) => { m[p.id] = +p.amount || 0; }); return m; }, [parking]);
+  const spotIds = useMemo(() => new Set(parking.map((p) => p.id)), [parking]);
   const scopedStatus = useMemo(() => allStatus.filter((s) => tenantIds.has(s.tenant_id)), [allStatus, tenantIds]);
 
   const rows = useMemo(() => {
@@ -471,15 +473,15 @@ function Summary({ tenants, allStatus, allParkPaid, parking, expenses, onJump })
       const a = bump(mk);
       tenants.forEach((t) => { if (monthReached(t.lease_start, mk)) a.expected += +t.lease_rent || 0; });
     });
-    // parking collected per month
-    allParkPaid.forEach((pp) => { if (pp.paid && spotAmt[pp.spot_id] != null) bump(pp.month).parking += spotAmt[pp.spot_id]; });
+    // parking collected per month (actual received amount, this property's spots)
+    allParkPaid.forEach((pp) => { if (spotIds.has(pp.spot_id)) bump(pp.month).parking += +pp.amount || 0; });
     // expenses per month
     expenses.forEach((e) => { const mk = (e.spent_on || "").slice(0, 7); if (mk) bump(mk).expenses += +e.amount || 0; });
 
     return Object.values(acc)
       .map((a) => ({ ...a, income: a.collected + a.parking, net: a.collected + a.parking - a.expenses, outstanding: Math.max(a.expected - a.collected, 0) }))
       .sort((x, y) => (x.period < y.period ? 1 : -1));
-  }, [scopedStatus, tenants, allParkPaid, spotAmt, expenses, grouping]);
+  }, [scopedStatus, tenants, allParkPaid, spotIds, expenses, grouping]);
 
   const tot = rows.reduce((s, r) => ({
     expected: s.expected + r.expected, collected: s.collected + r.collected, parking: s.parking + r.parking,
@@ -682,7 +684,7 @@ function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, mon
     if (r.assistance > 0) income["Assistance / supplements"] = (income["Assistance / supplements"] || 0) + r.assistance;
     if (r.portion > 0) income["Tenant paid"] = (income["Tenant paid"] || 0) + r.portion;
   });
-  const parkingCollected = parking.reduce((s, p) => s + (parkingPaid[p.id] ? +p.amount : 0), 0);
+  const parkingCollected = parking.reduce((s, p) => s + (+parkingPaid[p.id] || 0), 0);
   if (parkingCollected > 0) income["Parking"] = parkingCollected;
   const incomeRows = Object.entries(income).sort((a, b) => b[1] - a[1]);
   const totalIncome = incomeRows.reduce((s, [, v]) => s + v, 0);
@@ -695,7 +697,7 @@ function Overview({ roll, monthLabel, leaseAlerts, go, parking, parkingPaid, mon
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(190px,1fr))", gap: 14, marginBottom: 22 }}>
         <BigStat label={`Expected · ${monthLabel}`} value={money(roll.expected)} sub={`${roll.rows.length} active units`} accent="#1c2836" />
         <BigStat label="Collected" value={money(roll.collected)} sub={`${rate}% of rent roll`} accent="#0f7a54" />
-        <BigStat label="Parking income" value={money(parkingCollected)} sub={`${parking.filter((p) => parkingPaid[p.id]).length} of ${parking.length} spots paid`} accent="#3a6ea5" />
+        <BigStat label="Parking income" value={money(parkingCollected)} sub={`${parking.filter((p) => (+parkingPaid[p.id] || 0) > 0).length} of ${parking.length} spots paid`} accent="#3a6ea5" />
         <BigStat label="Outstanding" value={money(roll.outstanding)} sub={`${roll.owedCt + roll.partialCt} units short`} accent={roll.outstanding > 0.5 ? "#a83232" : "#0f7a54"} />
         <BigStat label="Net operating" value={money(net)} sub={`${money(totalIncome)} in − ${money(totalExpenses)} out`} accent={net >= 0 ? "#0f7a54" : "#a83232"} />
       </div>
@@ -818,7 +820,7 @@ function PLRow({ label, v }) {
 }
 
 /* ================= COLLECTIONS ================= */
-function Collections({ roll, monthLabel, setPay }) {
+function Collections({ roll, monthLabel, setPay, parking = [], parkingRec = {}, setParkingReceived }) {
   const isMobile = useIsMobile();
   return (
     <div>
@@ -892,6 +894,30 @@ function Collections({ roll, monthLabel, setPay }) {
       <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
         <Pencil size={12} /> Set each month's govt / tenant / assistance split and notes here — the database recomputes the total, variance, and status, and it syncs to everyone on the account.
       </div>
+
+      {parking.length > 0 && setParkingReceived && (
+        <CollectionsParking parking={parking} parkingRec={parkingRec} setParkingReceived={setParkingReceived} monthLabel={monthLabel} />
+      )}
+    </div>
+  );
+}
+
+/* Parking reconciliation inside Collections — enter the amount received per spot. */
+function CollectionsParking({ parking, parkingRec, setParkingReceived, monthLabel }) {
+  const expected = parking.reduce((s, p) => s + (+p.amount || 0), 0);
+  const collected = parking.reduce((s, p) => s + (+parkingRec[p.id] || 0), 0);
+  return (
+    <div style={{ ...S.card, padding: 0, overflow: "hidden", marginTop: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "14px 18px", borderBottom: "1px solid #eee9df", gap: 12, flexWrap: "wrap" }}>
+        <div style={{ ...S.cardTitle, display: "flex", alignItems: "center", gap: 8 }}><Car size={16} color="#5a6472" /> Parking · {monthLabel}</div>
+        <div style={{ display: "flex", gap: 20, fontFamily: "'IBM Plex Mono',monospace", fontSize: 12.5 }}>
+          <span style={{ color: "#8a8681" }}>Received <b style={{ color: "#0f7a54" }}>{money(collected)}</b></span>
+          <span style={{ color: "#8a8681" }}>Expected <b style={{ color: "#1c2836" }}>{money(expected)}</b></span>
+        </div>
+      </div>
+      {parking.map((p, i) => (
+        <ParkingRow key={p.id} p={p} received={+parkingRec[p.id] || 0} onCommit={(v) => setParkingReceived(p.id, v)} last={i === parking.length - 1} />
+      ))}
     </div>
   );
 }
@@ -1672,39 +1698,46 @@ function LogTab({ notes, onAdd, onRemove }) {
 }
 
 /* ================= PARKING ================= */
-function Parking({ parking, parkingPaid, monthLabel, toggle }) {
+function Parking({ parking, parkingRec, monthLabel, setReceived }) {
   const total = parking.reduce((s, p) => s + (+p.amount || 0), 0);
-  const collected = parking.reduce((s, p) => s + (parkingPaid[p.id] ? +p.amount : 0), 0);
+  const collected = parking.reduce((s, p) => s + (+parkingRec[p.id] || 0), 0);
   return (
     <div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(180px,1fr))", gap: 14, marginBottom: 18 }}>
         <BigStat label={`Parking roll · ${monthLabel}`} value={money(total)} sub={`${parking.length} spots`} accent="#1c2836" />
-        <BigStat label="Collected" value={money(collected)} sub={`${money(total - collected)} outstanding`} accent="#0f7a54" />
+        <BigStat label="Collected" value={money(collected)} sub={`${money(Math.max(total - collected, 0))} outstanding`} accent="#0f7a54" />
       </div>
       <div style={{ ...S.card, padding: 0, overflow: "hidden" }}>
-        {parking.map((p, i) => {
-          const paid = !!parkingPaid[p.id];
-          return (
-            <div key={p.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "13px 18px", borderBottom: i < parking.length - 1 ? "1px solid #f2eee5" : "none" }}>
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <div style={{ ...S.brassPlaque, background: "#eef1f4", width: 34, height: 34 }}><Car size={16} color="#5a6472" /></div>
-                <div>
-                  <div style={{ fontWeight: 600, fontSize: 14, color: "#1c2836" }}>{p.name}</div>
-                  <div style={{ fontSize: 11.5, color: "#8a8681" }}>{p.spot} · {p.method}</div>
-                </div>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
-                <Money v={p.amount} bold />
-                <button onClick={() => toggle(p.id)} style={{
-                  ...S.pill, background: paid ? "#e3f3ec" : "#f3f0e9", color: paid ? "#0f7a54" : "#8a8681",
-                  border: `1px solid ${paid ? "#12a06e44" : "#ddd7cb"}`,
-                }}>
-                  {paid ? <><Check size={13} /> Paid</> : "Mark paid"}
-                </button>
-              </div>
-            </div>
-          );
-        })}
+        {parking.map((p, i) => (
+          <ParkingRow key={p.id} p={p} received={+parkingRec[p.id] || 0} onCommit={(v) => setReceived(p.id, v)} last={i === parking.length - 1} />
+        ))}
+      </div>
+      <div style={{ fontSize: 12, color: "#8a8681", marginTop: 10, display: "flex", gap: 8, alignItems: "center" }}>
+        <Pencil size={12} /> Enter the amount actually received for each spot this month — or tap the expected price to fill it in. Parking income also appears on Collections and the Overview.
+      </div>
+    </div>
+  );
+}
+
+/* One parking spot's received-amount entry for the month (reconciled, not automatic). */
+function ParkingRow({ p, received, onCommit, last }) {
+  const expected = +p.amount || 0;
+  const status = received <= 0.001 ? "owed" : received + 0.5 >= expected ? "paid" : "partial";
+  return (
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "13px 18px", borderBottom: last ? "none" : "1px solid #f2eee5" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, minWidth: 0 }}>
+        <div style={{ ...S.brassPlaque, background: "#eef1f4", width: 34, height: 34 }}><Car size={16} color="#5a6472" /></div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontWeight: 600, fontSize: 14, color: "#1c2836", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
+          <div style={{ fontSize: 11.5, color: "#8a8681" }}>{p.spot} · {p.method} · expected <button onClick={() => onCommit(expected)} style={{ border: "none", background: "transparent", color: "#3a6ea5", fontWeight: 600, padding: 0, fontFamily: "'IBM Plex Mono',monospace", fontSize: 11.5 }}>{money(expected)}</button></div>
+        </div>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
+        <div style={{ textAlign: "right" }}>
+          <div style={{ fontSize: 10, color: "#a8a294", textTransform: "uppercase", letterSpacing: ".04em", marginBottom: 2 }}>Received</div>
+          <NumCell value={received || ""} onCommit={onCommit} />
+        </div>
+        <Stamp status={status} />
       </div>
     </div>
   );
