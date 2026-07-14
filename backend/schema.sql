@@ -50,11 +50,15 @@ create table if not exists tenants (
 --  PARKING SPOTS
 -- ============================================================
 create table if not exists parking_spots (
-  id      uuid primary key default gen_random_uuid(),
-  name    text not null,
-  spot    text not null,
-  amount  numeric(10,2) not null default 0,
-  method  text default 'Zelle'
+  id           uuid primary key default gen_random_uuid(),
+  name         text not null,
+  spot         text not null,
+  amount       numeric(10,2) not null default 0,
+  method       text default 'Zelle',
+  plate        text,          -- vehicle license plate
+  make         text,
+  model        text,
+  vehicle_year int
 );
 
 -- ============================================================
